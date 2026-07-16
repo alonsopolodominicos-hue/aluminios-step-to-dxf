@@ -4,6 +4,7 @@ FROM python:3.12-slim
 # librerías gráficas del sistema aunque el uso aquí sea 100% headless —
 # sin ellas, "import cadquery" falla con undefined symbol / libGL.so.1.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     libgl1 \
     libglu1-mesa \
     libgomp1 \
@@ -12,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libglib2.0-0 \
+    && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
