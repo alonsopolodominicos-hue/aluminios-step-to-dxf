@@ -23,4 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Render inyecta $PORT (por defecto 10000) y espera que el contenedor
+# escuche ahí — confiar en el autodetect de $EXPOSE es frágil. Forma shell
+# (no exec) para que ${PORT:-8000} se expanda; 8000 es el valor para
+# "docker run" local, donde no existe la variable PORT.
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}

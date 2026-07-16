@@ -58,7 +58,11 @@ def require_user(authorization: Optional[str]) -> str:
     _firebase_app()
     try:
         decoded = fb_auth.verify_id_token(token)
-    except Exception:
+    except Exception as e:
+        # El motivo real (proyecto de Firebase distinto, token caducado, reloj
+        # desincronizado...) se queda en los logs de Render — al cliente solo
+        # le llega el mensaje genérico, nunca detalles de la credencial.
+        print(f'[require_user] verify_id_token falló: {type(e).__name__}: {e}')
         raise HTTPException(status_code=401, detail='Token inválido o expirado')
     return decoded.get('uid', '')
 
@@ -73,7 +77,17 @@ def _safe_filename(name: str) -> str:
 @app.get('/')
 @app.get('/salud')
 async def salud():
-    return JSONResponse({'estado': 'ok'})
+    # project_id no es sensible (es público en la config del cliente Firebase)
+    # y permite comprobar en un segundo si esta credencial es del mismo
+    # proyecto que usa la app, sin tener que rebuscar en logs.
+    project_id = None
+    try:
+        b64 = os.environ.get('FIREBASE_SERVICE_ACCOUNT_BASE64')
+        if b64:
+            project_id = json.loads(base64.b64decode(b64).decode('utf-8')).get('project_id')
+    except Exception:
+        project_id = 'ERROR_AL_LEER_CREDENCIAL'
+    return JSONResponse({'estado': 'ok', 'firebase_project_id': project_id})
 
 
 @app.post('/')
