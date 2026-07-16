@@ -13,20 +13,16 @@ Piezas que no son una caja de 6 caras planas (herraje: tornillos, bisagras,
 geometría curva) se omiten y se listan aparte en el manifest — no se genera
 un DXF inventado para ellas.
 """
-import base64
+import hmac
 import io
-import json
 import os
 import tempfile
 import zipfile
 from typing import Optional
 
 import cadquery as cq
-import firebase_admin
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
-from firebase_admin import auth as fb_auth
-from firebase_admin import credentials
 
 from analisis import analizar_solido
 from dxf import generar_dxf_pieza
@@ -36,35 +32,30 @@ app = FastAPI()
 EXTENSIONES_VALIDAS = {'.step', '.stp'}
 
 
-# ── Autenticación (mismo patrón que api/cam-separar-dxf.py) ─────────────────
+# ── Autenticación ─────────────────────────────────────────────────────────
+#
+# Este servicio NO verifica tokens de Firebase directamente — lo intentamos
+# (require_user() con firebase-admin, igual que api/cam-separar-dxf.py) pero
+# el contenedor de Render no puede completar la conexión saliente a
+# googleapis.com para descargar los certificados públicos: Google devuelve
+# 403 a la IP compartida de salida de Render (bloqueo de reputación de IP,
+# no de nuestra credencial — DNS y TLS funcionan bien).
+#
+# En su lugar, src/app/api/admin/convertir-step/route.ts (Next.js/Vercel) es
+# el único que verifica la sesión real del usuario — verifyIdToken() nunca ha
+# fallado ahí — y llama a este servicio con un secreto compartido fijo
+# (STEP_CONVERTER_SECRET, igual en ambos lados). Este servicio nunca debe
+# quedar expuesto sin ese secreto: no vuelve a comprobar quién es el usuario.
 
-def _firebase_app() -> firebase_admin.App:
-    if firebase_admin._apps:
-        return firebase_admin.get_app()
-    b64 = os.environ.get('FIREBASE_SERVICE_ACCOUNT_BASE64')
-    if not b64:
-        raise RuntimeError('Falta FIREBASE_SERVICE_ACCOUNT_BASE64 en las variables de entorno')
-    service_account_info = json.loads(base64.b64decode(b64).decode('utf-8'))
-    return firebase_admin.initialize_app(credentials.Certificate(service_account_info))
-
-
-def require_user(authorization: Optional[str]) -> str:
-    """Exige solo sesión válida (sin el claim admin) — la usan tanto el panel
-    de admin como la app móvil de los trabajadores, mismo criterio que
-    requireUser() en src/lib/serverAuth.ts y que api/cam-separar-dxf.py."""
+def require_secreto_compartido(authorization: Optional[str]) -> None:
+    secreto = os.environ.get('STEP_CONVERTER_SECRET')
+    if not secreto:
+        raise RuntimeError('Falta STEP_CONVERTER_SECRET en las variables de entorno')
     if not authorization or not authorization.startswith('Bearer '):
-        raise HTTPException(status_code=401, detail='Falta token de autenticación')
-    token = authorization[len('Bearer '):]
-    _firebase_app()
-    try:
-        decoded = fb_auth.verify_id_token(token)
-    except Exception as e:
-        # El motivo real (proyecto de Firebase distinto, token caducado, reloj
-        # desincronizado...) se queda en los logs de Render — al cliente solo
-        # le llega el mensaje genérico, nunca detalles de la credencial.
-        print(f'[require_user] verify_id_token falló: {type(e).__name__}: {e}')
-        raise HTTPException(status_code=401, detail='Token inválido o expirado')
-    return decoded.get('uid', '')
+        raise HTTPException(status_code=401, detail='Falta autenticación de servicio')
+    recibido = authorization[len('Bearer '):]
+    if not hmac.compare_digest(recibido, secreto):
+        raise HTTPException(status_code=401, detail='Autenticación de servicio inválida')
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,68 +68,13 @@ def _safe_filename(name: str) -> str:
 @app.get('/')
 @app.get('/salud')
 async def salud():
-    # project_id no es sensible (es público en la config del cliente Firebase)
-    # y permite comprobar en un segundo si esta credencial es del mismo
-    # proyecto que usa la app, sin tener que rebuscar en logs.
-    project_id = None
-    try:
-        b64 = os.environ.get('FIREBASE_SERVICE_ACCOUNT_BASE64')
-        if b64:
-            project_id = json.loads(base64.b64decode(b64).decode('utf-8')).get('project_id')
-    except Exception:
-        project_id = 'ERROR_AL_LEER_CREDENCIAL'
-    return JSONResponse({'estado': 'ok', 'firebase_project_id': project_id})
-
-
-@app.get('/diag-red')
-async def diag_red():
-    """Diagnóstico temporal: reproduce la misma llamada de red que hace
-    firebase-admin al verificar un token, para ver la excepción real en vez
-    del mensaje genérico de CertificateFetchError. Se retira una vez
-    resuelto — no expone nada sensible, solo conectividad saliente."""
-    import socket
-    import time
-    resultado = {}
-
-    for host in ['www.googleapis.com', 'pypi.org', '8.8.8.8']:
-        try:
-            t0 = time.time()
-            ip = socket.gethostbyname(host) if host != '8.8.8.8' else host
-            resultado[f'dns_{host}'] = {'ok': True, 'ip': ip, 'ms': round((time.time() - t0) * 1000)}
-        except Exception as e:
-            resultado[f'dns_{host}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
-
-    import requests
-    url_certs = 'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
-    intentos = [
-        ('sin_user_agent', {}),
-        ('con_user_agent_navegador', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}),
-    ]
-    for etiqueta, headers in intentos:
-        try:
-            t0 = time.time()
-            r = requests.get(url_certs, timeout=8, headers=headers)
-            resultado[f'http_certs_{etiqueta}'] = {
-                'ok': True,
-                'status': r.status_code,
-                'ms': round((time.time() - t0) * 1000),
-                'cuerpo': r.text[:300],
-            }
-        except Exception as e:
-            resultado[f'http_certs_{etiqueta}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
-
-    try:
-        resultado['ip_publica_saliente'] = requests.get('https://api.ipify.org', timeout=5).text
-    except Exception as e:
-        resultado['ip_publica_saliente'] = f'error: {e}'
-
-    return JSONResponse(resultado)
+    return JSONResponse({'estado': 'ok'})
 
 
 @app.post('/')
 @app.post('/convertir')
 async def convertir(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
-    require_user(authorization)
+    require_secreto_compartido(authorization)
 
     raw = await file.read()
     if not raw:
