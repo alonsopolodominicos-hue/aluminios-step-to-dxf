@@ -90,6 +90,39 @@ async def salud():
     return JSONResponse({'estado': 'ok', 'firebase_project_id': project_id})
 
 
+@app.get('/diag-red')
+async def diag_red():
+    """Diagnóstico temporal: reproduce la misma llamada de red que hace
+    firebase-admin al verificar un token, para ver la excepción real en vez
+    del mensaje genérico de CertificateFetchError. Se retira una vez
+    resuelto — no expone nada sensible, solo conectividad saliente."""
+    import socket
+    import time
+    resultado = {}
+
+    for host in ['www.googleapis.com', 'pypi.org', '8.8.8.8']:
+        try:
+            t0 = time.time()
+            ip = socket.gethostbyname(host) if host != '8.8.8.8' else host
+            resultado[f'dns_{host}'] = {'ok': True, 'ip': ip, 'ms': round((time.time() - t0) * 1000)}
+        except Exception as e:
+            resultado[f'dns_{host}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+    import requests
+    for url in [
+        'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com',
+        'https://pypi.org',
+    ]:
+        try:
+            t0 = time.time()
+            r = requests.get(url, timeout=8)
+            resultado[f'http_{url}'] = {'ok': True, 'status': r.status_code, 'ms': round((time.time() - t0) * 1000)}
+        except Exception as e:
+            resultado[f'http_{url}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+    return JSONResponse(resultado)
+
+
 @app.post('/')
 @app.post('/convertir')
 async def convertir(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
