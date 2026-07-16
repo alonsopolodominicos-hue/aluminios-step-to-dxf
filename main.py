@@ -109,16 +109,28 @@ async def diag_red():
             resultado[f'dns_{host}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
 
     import requests
-    for url in [
-        'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com',
-        'https://pypi.org',
-    ]:
+    url_certs = 'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+    intentos = [
+        ('sin_user_agent', {}),
+        ('con_user_agent_navegador', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}),
+    ]
+    for etiqueta, headers in intentos:
         try:
             t0 = time.time()
-            r = requests.get(url, timeout=8)
-            resultado[f'http_{url}'] = {'ok': True, 'status': r.status_code, 'ms': round((time.time() - t0) * 1000)}
+            r = requests.get(url_certs, timeout=8, headers=headers)
+            resultado[f'http_certs_{etiqueta}'] = {
+                'ok': True,
+                'status': r.status_code,
+                'ms': round((time.time() - t0) * 1000),
+                'cuerpo': r.text[:300],
+            }
         except Exception as e:
-            resultado[f'http_{url}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+            resultado[f'http_certs_{etiqueta}'] = {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+    try:
+        resultado['ip_publica_saliente'] = requests.get('https://api.ipify.org', timeout=5).text
+    except Exception as e:
+        resultado['ip_publica_saliente'] = f'error: {e}'
 
     return JSONResponse(resultado)
 
