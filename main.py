@@ -15,12 +15,14 @@ un DXF inventado para ellas.
 """
 import hmac
 import io
+import json
 import os
 import tempfile
 import zipfile
 from typing import Optional
 
 import cadquery as cq
+from cadquery import exporters
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 
@@ -65,17 +67,10 @@ def _safe_filename(name: str) -> str:
     return cleaned[:48] or 'pieza'
 
 
-@app.get('/')
-@app.get('/salud')
-async def salud():
-    return JSONResponse({'estado': 'ok'})
-
-
-@app.post('/')
-@app.post('/convertir')
-async def convertir(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
-    require_secreto_compartido(authorization)
-
+async def _cargar_step(file: UploadFile):
+    """Lee el UploadFile, lo escribe a un temporal y lo carga con cadquery.
+    Devuelve (nombre_original, resultado_cadquery). Lanza HTTPException 400
+    si el archivo está vacío o no se puede leer como STEP."""
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail='El archivo está vacío')
@@ -97,13 +92,54 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
         if tmp_path:
             os.unlink(tmp_path)
 
+    return nombre_original, resultado
+
+
+@app.get('/')
+@app.get('/salud')
+async def salud():
+    return JSONResponse({'estado': 'ok'})
+
+
+@app.post('/previsualizar')
+async def previsualizar(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    """Devuelve el STL del ensamblaje completo (todas las piezas del STEP) para
+    poder verlo en 3D antes de convertir — no hace ningún análisis, solo
+    tesela la geometría tal cual viene."""
+    require_secreto_compartido(authorization)
+    _, resultado = await _cargar_step(file)
+
+    tmp_stl = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
+            tmp_stl = tmp.name
+        exporters.export(resultado.val(), tmp_stl, exportType='STL')
+        with open(tmp_stl, 'rb') as f:
+            contenido = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'No se pudo generar la vista 3D: {e}')
+    finally:
+        if tmp_stl and os.path.exists(tmp_stl):
+            os.unlink(tmp_stl)
+
+    return Response(content=contenido, media_type='model/stl')
+
+
+@app.post('/')
+@app.post('/convertir')
+async def convertir(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    require_secreto_compartido(authorization)
+
+    nombre_original, resultado = await _cargar_step(file)
+
     solidos = resultado.solids().vals()
     if not solidos:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
     zip_buffer = io.BytesIO()
-    manifest_lines = ['Pieza\tLongitud\tSección\tÁngulo A\tÁngulo B\tUnidad']
+    manifest_lines = ['Pieza\tLongitud\tSección\tÁngulo A\tÁngulo B\tTaladros\tUnidad']
     omitidas_lines = ['Sólido\tMotivo']
+    piezas_json = []
     piezas_generadas = 0
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -125,8 +161,18 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
             manifest_lines.append(
                 f"{nombre_archivo}\t{analisis['longitud']:.2f}\t"
                 f"{analisis['seccion'][0]:.2f}x{analisis['seccion'][1]:.2f}{marca}\t"
-                f"{analisis['angulo_corte_a']:.1f}°\t{analisis['angulo_corte_b']:.1f}°\tmm"
+                f"{analisis['angulo_corte_a']:.1f}°\t{analisis['angulo_corte_b']:.1f}°\t"
+                f"{len(analisis['taladros'])}\tmm"
             )
+            piezas_json.append({
+                'nombre_capa': nombre_capa,
+                'longitud': round(analisis['longitud'], 2),
+                'seccion': [round(s, 2) for s in analisis['seccion']],
+                'seccion_regular': analisis['seccion_regular'],
+                'angulo_corte_a': round(analisis['angulo_corte_a'], 1),
+                'angulo_corte_b': round(analisis['angulo_corte_b'], 1),
+                'taladros': analisis['taladros'],
+            })
 
         if piezas_generadas == 0:
             raise HTTPException(
@@ -137,6 +183,7 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
         zf.writestr('manifest.txt', '\n'.join(manifest_lines))
         if len(omitidas_lines) > 1:
             zf.writestr('omitidas.txt', '\n'.join(omitidas_lines))
+        zf.writestr('analisis.json', json.dumps(piezas_json, ensure_ascii=False))
 
     zip_buffer.seek(0)
     base_nombre = nombre_original.rsplit('.', 1)[0]
