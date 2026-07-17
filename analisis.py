@@ -382,22 +382,14 @@ def _fusionar_avellanados(cilindros):
     return resultado
 
 
-def _asignar_taladros(cilindros, faces_planas, grupos, env):
-    """Convierte cada cilindro en un taladro con cara semántica, posición 2D en
-    el marco local, profundidad y pasante. La cara se decide por la BOCA: el
-    extremo del rango axial más cercano al plano de una cara compatible."""
+def _asignar_taladros(cilindros, grupos, env):
+    """Convierte cada cilindro (ya filtrado como taladro real) en un taladro
+    con cara semántica, posición 2D en el marco local, profundidad y pasante.
+    La cara se decide por la BOCA: el extremo del rango axial más cercano al
+    plano de una cara compatible. Devuelve una lista 1:1 con `cilindros`."""
     taladros = []
-    descartados = 0
-
-    mayor_dim = max(env['ancho_y'], env['grosor_z'], 1.0)
 
     for cil in cilindros:
-        # Filtro de no-taladros: barrido angular insuficiente (fillet, fresado
-        # parcial) o radio absurdo para la pieza.
-        if cil['barrido'] < BARRIDO_MIN_TALADRO or cil['radio'] * 2 > mayor_dim * 1.5:
-            descartados += 1
-            continue
-
         # Caras candidatas: normal ~paralela al eje del cilindro.
         candidatas = [k for k in range(len(grupos))
                       if abs(_dot(cil['d'], grupos[k]['normal'])) >= UMBRAL_EJE_TALADRO]
@@ -462,7 +454,47 @@ def _asignar_taladros(cilindros, faces_planas, grupos, env):
             taladro['avellanado'] = cil['avellanado']
         taladros.append(taladro)
 
-    return taladros, descartados
+    return taladros
+
+
+def _fusionar_pasantes_perfil_hueco(taladros, cilindros, env):
+    """Los perfiles de aluminio reales son HUECOS (pared ~1.5 mm): un taladro
+    pasante atraviesa dos paredes y aparece como dos perforaciones cortas en
+    caras opuestas sobre el mismo eje. Para el taller eso es UN taladro
+    pasante con la profundidad total del perfil. Se fusionan solo pares de
+    caras LATERALES opuestas (frontal/trasera, superior/inferior) — dos
+    taladros axiales independientes en los extremos NO se fusionan."""
+    PARES_OPUESTOS = {('frontal', 'trasera'), ('superior', 'inferior')}
+    resultado = []
+    usados = set()
+    for i, a in enumerate(taladros):
+        if i in usados or a['cara'] is None:
+            if i not in usados:
+                resultado.append(a)
+            continue
+        fusionado = None
+        for j in range(i + 1, len(taladros)):
+            if j in usados:
+                continue
+            b = taladros[j]
+            if b['cara'] is None or abs(a['diametro'] - b['diametro']) > TOL_RADIO * 2:
+                continue
+            par = tuple(sorted((a['cara'], b['cara'])))
+            if par not in {tuple(sorted(p)) for p in PARES_OPUESTOS}:
+                continue
+            if not _misma_linea(cilindros[i], cilindros[j]):
+                continue
+            # Fusionar: se conserva la cara "positiva" (frontal/superior) y la
+            # profundidad pasa a ser el espesor total del perfil en ese eje.
+            principal = a if a['cara'] in ('frontal', 'superior') else b
+            span = env['grosor_z'] if principal['cara'] == 'frontal' else env['ancho_y']
+            fusionado = {**principal, 'pasante': True, 'profundidad': round(span, 2)}
+            usados.add(i)
+            usados.add(j)
+            break
+        resultado.append(fusionado if fusionado else a)
+        usados.add(i)
+    return resultado
 
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
@@ -482,7 +514,17 @@ def analizar_solido(solid):
 
     caras_cil = _caras_cilindricas(solid)
     cilindros = _fusionar_avellanados(_agrupar_cilindros(caras_cil))
-    taladros, descartados = _asignar_taladros(cilindros, faces_planas, grupos, env)
+
+    # Filtro de no-taladros ANTES de asignar (fillets/fresados parciales por
+    # barrido angular, radios absurdos) — mantiene el 1:1 taladro↔cilindro
+    # que necesita la fusión de pasantes de perfil hueco.
+    mayor_dim = max(env['ancho_y'], env['grosor_z'], 1.0)
+    validos = [c for c in cilindros
+               if c['barrido'] >= BARRIDO_MIN_TALADRO and c['radio'] * 2 <= mayor_dim * 1.5]
+    descartados = len(cilindros) - len(validos)
+
+    taladros = _asignar_taladros(validos, grupos, env)
+    taladros = _fusionar_pasantes_perfil_hueco(taladros, validos, env)
 
     return {
         'ok': True,

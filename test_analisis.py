@@ -219,9 +219,35 @@ def caso_trapecio():
     check('un corte recto y uno a 45°', aprox(angs[0], 0, 0.5) and aprox(angs[1], 45, 0.5), f'{angs}')
 
 
+# ── Caso 8: perfil HUECO con taladro pasante (dos paredes → un taladro) ──────
+# Tubo 400×60×40 con pared de 2mm y un taladro Ø8 que atraviesa las dos
+# paredes frontales (perfil de aluminio real). Debe salir UN taladro pasante
+# con profundidad = 40 (el perfil entero), no dos perforaciones de 2mm.
+def caso_perfil_hueco():
+    print('Caso 8: perfil hueco — taladro a través de dos paredes = UNO pasante')
+    exterior = cq.Workplane('XY').box(400, 60, 40, centered=(False, False, False)).val()
+    interior = cq.Workplane('XY').transformed(offset=(0, 2, 2)).box(400, 56, 36, centered=(False, False, False)).val()
+    tubo = exterior.cut(interior)
+    taladro = cq.Solid.makeCylinder(4, 40, cq.Vector(150, 30, 0), cq.Vector(0, 0, 1))
+    pieza = tubo.cut(taladro)
+    r = analizar(pieza)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    check('longitud 400', aprox(r['longitud'], 400), f"{r['longitud']}")
+    tal = r['taladros']
+    check('UN taladro (paredes fusionadas)', len(tal) == 1, f'{len(tal)}: {tal}')
+    if len(tal) == 1:
+        t = tal[0]
+        check('pasante con prof = 40 (perfil completo)', t['pasante'] and aprox(t['profundidad'], 40, 0.5), f'{t}')
+        check('x=150 y=30', aprox(t['x'], 150) and aprox(t['y'], 30), f"{t['x']}, {t['y']}")
+        check('cara frontal (convención positiva)', t['cara'] == 'frontal', f"{t['cara']}")
+
+
 if __name__ == '__main__':
     for caso in (caso_barra_taladros, caso_axiales_extremos, caso_caras_opuestas,
-                 caso_fillets, caso_avellanado, caso_paralelogramo, caso_trapecio):
+                 caso_fillets, caso_avellanado, caso_paralelogramo, caso_trapecio,
+                 caso_perfil_hueco):
         caso()
         print()
     if FALLOS:
