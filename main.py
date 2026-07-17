@@ -106,26 +106,36 @@ async def salud():
 
 @app.post('/previsualizar')
 async def previsualizar(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
-    """Devuelve el STL del ensamblaje completo (todas las piezas del STEP) para
-    poder verlo en 3D antes de convertir — no hace ningún análisis, solo
-    tesela la geometría tal cual viene."""
+    """Devuelve un ZIP con un STL por sólido del STEP para poder verlos en 3D
+    antes de convertir, cada uno pintable de un color distinto en el visor —
+    un único STL fusionado no distingue piezas que se solapan o quedan casi
+    de canto desde el ángulo de cámara por defecto. No hace ningún análisis,
+    solo tesela la geometría de cada sólido tal cual viene."""
     require_secreto_compartido(authorization)
     _, resultado = await _cargar_step(file)
 
-    tmp_stl = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
-            tmp_stl = tmp.name
-        exporters.export(resultado.val(), tmp_stl, exportType='STL')
-        with open(tmp_stl, 'rb') as f:
-            contenido = f.read()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f'No se pudo generar la vista 3D: {e}')
-    finally:
-        if tmp_stl and os.path.exists(tmp_stl):
-            os.unlink(tmp_stl)
+    solidos = resultado.solids().vals()
+    if not solidos:
+        raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
-    return Response(content=contenido, media_type='model/stl')
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, solido in enumerate(solidos):
+            tmp_stl = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
+                    tmp_stl = tmp.name
+                exporters.export(solido, tmp_stl, exportType='STL')
+                with open(tmp_stl, 'rb') as f:
+                    zf.writestr(f'pieza_{idx:03d}.stl', f.read())
+            except Exception as e:
+                print(f'[previsualizar] sólido {idx} no se pudo teselar: {type(e).__name__}: {e}')
+            finally:
+                if tmp_stl and os.path.exists(tmp_stl):
+                    os.unlink(tmp_stl)
+
+    zip_buffer.seek(0)
+    return Response(content=zip_buffer.getvalue(), media_type='application/zip')
 
 
 @app.post('/')
