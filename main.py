@@ -50,7 +50,7 @@ EXTENSIONES_VALIDAS = {'.step', '.stp'}
 def require_secreto_compartido(authorization: Optional[str]) -> None:
     secreto = os.environ.get('STEP_CONVERTER_SECRET')
     if not secreto:
-        raise RuntimeError('Falta STEP_CONVERTER_SECRET en las variables de entorno')
+        raise HTTPException(status_code=500, detail='Falta STEP_CONVERTER_SECRET en las variables de entorno del servicio')
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Falta autenticación de servicio')
     recibido = authorization[len('Bearer '):]
