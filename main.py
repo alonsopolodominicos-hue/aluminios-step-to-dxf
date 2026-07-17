@@ -1,6 +1,9 @@
 """POST /convertir — recibe un STEP (.step/.stp) con piezas de perfil de
 aluminio y devuelve un ZIP con un DXF esquemático de corte por pieza
-(longitud, ángulos de extremo y sección), más un manifest.txt.
+(longitud, ángulos de extremo, sección y taladros), un .bpp por pieza con
+taladros de canto (lo añade src/app/api/admin/convertir-step/route.ts a
+partir de analisis.json), manifest.txt, y conjunto_completo.stl — el
+ensamblaje entero en 3D, de referencia, sin separar en piezas.
 
 Servicio Docker aparte (no cabe como función serverless de Vercel: el wheel
 de cadquery/OCP pesa varios cientos de MB). Ver
@@ -184,6 +187,21 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
         if len(omitidas_lines) > 1:
             zf.writestr('omitidas.txt', '\n'.join(omitidas_lines))
         zf.writestr('analisis.json', json.dumps(piezas_json, ensure_ascii=False))
+
+        # Conjunto completo en 3D (todas las piezas montadas, sin separar) —
+        # de referencia, no es un plano acotado. Mismo export que /previsualizar.
+        tmp_stl = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
+                tmp_stl = tmp.name
+            exporters.export(resultado.val(), tmp_stl, exportType='STL')
+            with open(tmp_stl, 'rb') as f:
+                zf.writestr('conjunto_completo.stl', f.read())
+        except Exception as e:
+            print(f'[convertir] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
+        finally:
+            if tmp_stl and os.path.exists(tmp_stl):
+                os.unlink(tmp_stl)
 
     zip_buffer.seek(0)
     base_nombre = nombre_original.rsplit('.', 1)[0]
