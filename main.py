@@ -150,7 +150,9 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
     zip_buffer = io.BytesIO()
-    manifest_lines = ['Pieza\tLongitud\tSección\tÁngulo A\tÁngulo B\tTaladros\tUnidad']
+    # "Extremo" = taladros axiales de testero: aparecen en el DXF y en
+    # analisis.json pero NO en el .bpp (el formato de panel no los representa).
+    manifest_lines = ['Pieza\tLongitud\tSección\tÁngulo A\tÁngulo B\tTaladros\tPasantes\tExtremo (no BPP)\tDescartados\tUnidad']
     omitidas_lines = ['Sólido\tMotivo']
     piezas_json = []
     piezas_generadas = 0
@@ -171,20 +173,26 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
             zf.writestr(nombre_archivo, buffer_pieza.getvalue())
 
             marca = '' if analisis['seccion_regular'] else ' (aprox.)'
+            tal = analisis['taladros']
+            pasantes = sum(1 for x in tal if x.get('pasante'))
+            extremos = sum(1 for x in tal if x.get('es_extremo'))
             manifest_lines.append(
                 f"{nombre_archivo}\t{analisis['longitud']:.2f}\t"
                 f"{analisis['seccion'][0]:.2f}x{analisis['seccion'][1]:.2f}{marca}\t"
                 f"{analisis['angulo_corte_a']:.1f}°\t{analisis['angulo_corte_b']:.1f}°\t"
-                f"{len(analisis['taladros'])}\tmm"
+                f"{len(tal)}\t{pasantes}\t{extremos}\t{analisis['taladros_descartados']}\tmm"
             )
             piezas_json.append({
                 'nombre_capa': nombre_capa,
                 'longitud': round(analisis['longitud'], 2),
                 'seccion': [round(s, 2) for s in analisis['seccion']],
                 'seccion_regular': analisis['seccion_regular'],
+                'ancho': analisis['ancho'],
+                'grosor': analisis['grosor'],
                 'angulo_corte_a': round(analisis['angulo_corte_a'], 1),
                 'angulo_corte_b': round(analisis['angulo_corte_b'], 1),
                 'taladros': analisis['taladros'],
+                'taladros_descartados': analisis['taladros_descartados'],
             })
 
         if piezas_generadas == 0:
