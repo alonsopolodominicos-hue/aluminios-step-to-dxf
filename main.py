@@ -16,23 +16,37 @@ Piezas que no son una caja de 6 caras planas (herraje: tornillos, bisagras,
 geometría curva) se omiten y se listan aparte en el manifest — no se genera
 un DXF inventado para ellas.
 """
+import hashlib
 import hmac
 import io
 import json
 import os
 import tempfile
+import time
 import zipfile
 from typing import Optional
 
 import cadquery as cq
 from cadquery import exporters
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from analisis import analizar_solido
 from dxf import generar_dxf_pieza
 
 app = FastAPI()
+
+# El navegador sube los STEP DIRECTAMENTE aquí (Vercel rechaza cuerpos de más
+# de 4.5 MB — límite de plataforma), autenticado con un token firmado de corta
+# duración que emite Vercel. CORS abierto: la autorización real es el token.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_methods=['GET', 'POST'],
+    allow_headers=['authorization', 'content-type'],
+    expose_headers=['content-disposition', 'x-piezas-count', 'x-piezas-omitidas'],
+)
 
 EXTENSIONES_VALIDAS = {'.step', '.stp'}
 
@@ -52,6 +66,25 @@ EXTENSIONES_VALIDAS = {'.step', '.stp'}
 # (STEP_CONVERTER_SECRET, igual en ambos lados). Este servicio nunca debe
 # quedar expuesto sin ese secreto: no vuelve a comprobar quién es el usuario.
 
+def _token_firmado_valido(token: str, secreto: str) -> bool:
+    """Token de subida directa desde el navegador: "firmado.<exp>.<hmac>" con
+    hmac = HMAC-SHA256(secreto, "subida:<exp>"). Lo emite Vercel (que sí ha
+    verificado la sesión del usuario o el token público) con ~10 min de vida;
+    el navegador lo usa para subir el STEP directamente aquí, evitando el
+    límite de 4.5 MB de cuerpo de las funciones de Vercel."""
+    try:
+        prefijo, exp_s, firma = token.split('.', 2)
+        if prefijo != 'firmado':
+            return False
+        exp = int(exp_s)
+        if exp < time.time():
+            return False
+        esperado = hmac.new(secreto.encode(), f'subida:{exp}'.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(firma, esperado)
+    except Exception:
+        return False
+
+
 def require_secreto_compartido(authorization: Optional[str]) -> None:
     secreto = os.environ.get('STEP_CONVERTER_SECRET')
     if not secreto:
@@ -59,8 +92,11 @@ def require_secreto_compartido(authorization: Optional[str]) -> None:
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Falta autenticación de servicio')
     recibido = authorization[len('Bearer '):]
-    if not hmac.compare_digest(recibido, secreto):
-        raise HTTPException(status_code=401, detail='Autenticación de servicio inválida')
+    if hmac.compare_digest(recibido, secreto):
+        return  # secreto directo (proxy de Vercel)
+    if _token_firmado_valido(recibido, secreto):
+        return  # token firmado de subida directa (navegador)
+    raise HTTPException(status_code=401, detail='Autenticación de servicio inválida')
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
