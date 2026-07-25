@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from analisis import analizar_solido
+from analisis_panel import analizar_solido_panel
 from dxf import generar_dxf_pieza
 
 app = FastAPI()
@@ -270,3 +271,47 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
             'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, Content-Disposition',
         },
     )
+
+
+@app.post('/analizar-panel')
+async def analizar_panel(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    """Analiza un STEP de un mueble de madera/melamina: por cada sólido,
+    intenta reconocerlo como panel de tablero (largo×ancho×grosor + taladros
+    detectados). Devuelve JSON directo, sin DXF ni ZIP — a diferencia de
+    /convertir, aquí el despiece y el .bpp real los construye después el
+    navegador (src/lib/despiece/despieceDesdeStepPanel.ts), reutilizando el
+    mismo motor BPP ya usado por el resto de la app para muebles."""
+    require_secreto_compartido(authorization)
+
+    _, resultado = await _cargar_step(file)
+
+    solidos = resultado.solids().vals()
+    if not solidos:
+        raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
+
+    piezas = []
+    omitidas = []
+    for idx, solido in enumerate(solidos):
+        analisis = analizar_solido_panel(solido)
+        if not analisis['ok']:
+            omitidas.append({'solido': idx, 'motivo': analisis['motivo']})
+            continue
+        piezas.append({
+            'nombre_capa': _safe_filename(f"pieza_{idx:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}"),
+            'largo': analisis['largo'],
+            'ancho': analisis['ancho'],
+            'grosor': analisis['grosor'],
+            'seccion_regular': analisis['seccion_regular'],
+            'taladros': analisis['taladros'],
+            'taladros_descartados': analisis['taladros_descartados'],
+            'cajeados': analisis.get('cajeados', []),
+            'advertencias': analisis['advertencias'],
+        })
+
+    if not piezas:
+        raise HTTPException(
+            status_code=400,
+            detail='Ningún sólido del STEP se pudo interpretar como panel de tablero',
+        )
+
+    return JSONResponse({'piezas': piezas, 'omitidas': omitidas})
