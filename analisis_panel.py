@@ -187,7 +187,17 @@ UMBRAL_PANEL_GROSOR_ANCHO = 0.3
 # la notará por el material/contexto, no por un aviso automático.
 
 
-def _advertencias_panel(largo, ancho, grosor):
+# Piezas reales del taller (jul 2026) confirmaron paneles con un borde
+# angulado (no rectangular — un filler/remate en ángulo, p. ej. un mueble en
+# esquina): 3 de 13 piezas válidas de un mismo montaje real traían 3.6°-11.1°.
+# `largo`/`ancho` siguen siendo la caja envolvente (necesaria para el
+# despiece/BPP, que solo maneja piezas rectangulares) — este aviso deja claro
+# que la forma REAL no es un rectángulo, para que se revise a mano antes de
+# cortar en vez de asumir silenciosamente un rectángulo que no es.
+UMBRAL_ANGULO_RECTO = 1.0  # grados — por debajo es ruido numérico de un corte recto
+
+
+def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0):
     avisos = []
     if largo <= 0 or ancho <= 0:
         return avisos
@@ -195,6 +205,11 @@ def _advertencias_panel(largo, ancho, grosor):
         avisos.append(
             f'Grosor {grosor:.1f}mm parece grande para un panel de {ancho:.1f}mm de ancho '
             '(¿es en realidad una barra/listón de sección maciza, no un panel de tablero?)'
+        )
+    if angulo_a > UMBRAL_ANGULO_RECTO or angulo_b > UMBRAL_ANGULO_RECTO:
+        avisos.append(
+            f'Borde no rectangular detectado (ángulos {angulo_a:.1f}°/{angulo_b:.1f}° en los cantos cortos) — '
+            f'largo/ancho son la caja envolvente, NO la forma real de la pieza; revisar y ajustar a mano antes de cortar.'
         )
     return avisos
 
@@ -245,5 +260,5 @@ def analizar_solido_panel(solid):
         'taladros': taladros,
         'taladros_descartados': descartados,
         'cajeados': cajeados,
-        'advertencias': _advertencias_panel(largo, ancho, grosor),
+        'advertencias': _advertencias_panel(largo, ancho, grosor, env['angulo_corte_a'], env['angulo_corte_b']),
     }

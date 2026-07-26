@@ -289,13 +289,40 @@ def caso_ranura_abierta_a_canto():
           len(r['cajeados']) == 0, f"{r['cajeados']}")
 
 
+# ── Caso 16 (dato real): panel con borde anguloso (no rectangular) ──────────
+# Confirmado en un STEP real del taller (2876_6423): 3 de 13 piezas válidas de
+# un mismo montaje traían un canto en ángulo (3.6°-11.1°) — un filler/remate de
+# esquina, no un rectángulo. largo/ancho siguen siendo la caja envolvente (el
+# despiece solo maneja piezas rectangulares); lo único nuevo es avisar de que
+# la forma real NO es esa caja, para que se revise a mano antes de cortar.
+def caso_borde_angulado_avisa():
+    print('Caso 16 (dato real): panel con borde no rectangular (0°/45°) — avisa, no bloquea')
+    # Mismo trapecio validado en test_analisis.py::caso_trapecio (recto + inglete
+    # 45°), interpretado como panel: 400 de largo, 60 de ancho, 30 de grosor
+    # (el par lateral de MENOR separación, igual que en una barra).
+    panel = (
+        cq.Workplane('XY')
+        .polyline([(0, 0), (340, 0), (400, 60), (0, 60)]).close()
+        .extrude(30)
+    )
+    r = analizar(panel)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    check('largo 400 (envolvente, no la forma real)', aprox(r['largo'], 400, 0.5), f"{r['largo']}")
+    check('ancho 60, grosor 30', aprox(r['ancho'], 60) and aprox(r['grosor'], 30), f"{r['ancho']}, {r['grosor']}")
+    check('avisa de borde no rectangular (0°/45°)',
+          any('no rectangular' in a for a in r['advertencias']), f"{r['advertencias']}")
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
                  caso_ranura_abierta_a_canto, caso_casi_cuadrado_sin_avisos,
                  caso_encimera_gruesa_sin_avisos, caso_liston_estrecho_sin_avisos,
                  caso_perfil_cuadrado_avisa, caso_panel_pequeño_cuadrado_sin_avisos,
-                 caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos):
+                 caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
+                 caso_borde_angulado_avisa):
         caso()
         print()
     if FALLOS:
