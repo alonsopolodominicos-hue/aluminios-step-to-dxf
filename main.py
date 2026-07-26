@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse, Response
 from analisis import analizar_solido
 from analisis_panel import analizar_solido_panel
 from dxf import generar_dxf_pieza
+from dxf_panel import generar_dxf_panel
 
 app = FastAPI()
 
@@ -315,3 +316,103 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
         )
 
     return JSONResponse({'piezas': piezas, 'omitidas': omitidas})
+
+
+@app.post('/convertir-panel')
+async def convertir_panel(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    """Como /convertir pero para MUEBLES de madera/melamina: cada sólido se
+    analiza como panel de tablero y el ZIP lleva un DXF por pieza (1:1, en el
+    origen, con taladros/cajeados y tabla de mecanizados), manifest.txt,
+    omitidas.txt, analisis_panel.json y conjunto_completo.stl. Los .bpp por
+    pieza los añade el navegador a partir del analisis_panel.json (mismo
+    reparto de trabajo que el flujo de perfiles)."""
+    require_secreto_compartido(authorization)
+
+    nombre_original, resultado = await _cargar_step(file)
+
+    solidos = resultado.solids().vals()
+    if not solidos:
+        raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
+
+    zip_buffer = io.BytesIO()
+    manifest_lines = ['Pieza\tLargo\tAncho\tGrosor\tTaladros\tCajeados\tAvisos\tUnidad']
+    omitidas_lines = ['Sólido\tMotivo']
+    piezas_json = []
+    piezas_generadas = 0
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, solido in enumerate(solidos):
+            analisis = analizar_solido_panel(solido)
+            if not analisis['ok']:
+                omitidas_lines.append(f"{idx}\t{analisis['motivo']}")
+                continue
+
+            piezas_generadas += 1
+            nombre_capa = _safe_filename(f"pieza_{idx:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}")
+            doc = generar_dxf_panel(nombre_capa, analisis)
+            buffer_pieza = io.StringIO()
+            doc.write(buffer_pieza)
+            zf.writestr(f'{nombre_capa}.dxf', buffer_pieza.getvalue())
+
+            avisos = analisis['advertencias']
+            manifest_lines.append(
+                f"{nombre_capa}.dxf\t{analisis['largo']:.2f}\t{analisis['ancho']:.2f}\t"
+                f"{analisis['grosor']:.2f}\t{len(analisis['taladros'])}\t{len(analisis['cajeados'])}\t"
+                f"{' | '.join(avisos) if avisos else '-'}\tmm"
+            )
+            piezas_json.append({
+                'nombre_capa': nombre_capa,
+                'largo': analisis['largo'],
+                'ancho': analisis['ancho'],
+                'grosor': analisis['grosor'],
+                'seccion_regular': analisis['seccion_regular'],
+                'taladros': analisis['taladros'],
+                'taladros_descartados': analisis['taladros_descartados'],
+                'cajeados': analisis['cajeados'],
+                'advertencias': avisos,
+            })
+
+        if piezas_generadas == 0:
+            raise HTTPException(
+                status_code=400,
+                detail='Ningún sólido del STEP se pudo interpretar como panel de tablero',
+            )
+
+        zf.writestr('manifest.txt', '\n'.join(manifest_lines))
+        if len(omitidas_lines) > 1:
+            zf.writestr('omitidas.txt', '\n'.join(omitidas_lines))
+        zf.writestr('analisis_panel.json', json.dumps({
+            'piezas': piezas_json,
+            'omitidas': [
+                {'solido': int(l.split('\t')[0]), 'motivo': l.split('\t')[1]}
+                for l in omitidas_lines[1:]
+            ],
+        }, ensure_ascii=False))
+
+        # Conjunto completo en 3D — mismo export de referencia que /convertir.
+        tmp_stl = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
+                tmp_stl = tmp.name
+            exporters.export(resultado.val(), tmp_stl, exportType='STL')
+            with open(tmp_stl, 'rb') as f:
+                zf.writestr('conjunto_completo.stl', f.read())
+        except Exception as e:
+            print(f'[convertir-panel] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
+        finally:
+            if tmp_stl and os.path.exists(tmp_stl):
+                os.unlink(tmp_stl)
+
+    zip_buffer.seek(0)
+    base_nombre = nombre_original.rsplit('.', 1)[0]
+    nombre_zip = f'{_safe_filename(base_nombre)}_despiece.zip'
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type='application/zip',
+        headers={
+            'Content-Disposition': f'attachment; filename="{nombre_zip}"',
+            'X-Piezas-Count': str(piezas_generadas),
+            'X-Piezas-Omitidas': str(len(omitidas_lines) - 1),
+            'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, Content-Disposition',
+        },
+    )
