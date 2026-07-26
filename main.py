@@ -306,6 +306,7 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
             'taladros': analisis['taladros'],
             'taladros_descartados': analisis['taladros_descartados'],
             'cajeados': analisis.get('cajeados', []),
+            'contorno': analisis.get('contorno'),
             'advertencias': analisis['advertencias'],
         })
 
@@ -369,6 +370,7 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
                 'taladros': analisis['taladros'],
                 'taladros_descartados': analisis['taladros_descartados'],
                 'cajeados': analisis['cajeados'],
+                'contorno': analisis.get('contorno'),
                 'advertencias': avisos,
             })
 

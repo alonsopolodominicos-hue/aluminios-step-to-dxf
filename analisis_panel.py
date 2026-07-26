@@ -43,18 +43,29 @@ test_analisis_panel.py — es un fallo silencioso y seguro (el usuario la añade
 a mano), no un dato falso que pueda acabar en un corte real equivocado.
 """
 from cadquery import Vector
+from OCP.BRepAdaptor import BRepAdaptor_Curve
+from OCP.BRepTools import BRepTools_WireExplorer
+from OCP.GCPnts import GCPnts_QuasiUniformDeflection
+from OCP.GeomAbs import GeomAbs_CurveType
+from OCP.TopAbs import TopAbs_Orientation
 
 from analisis import (
     _es_plana,
     _clusterizar_caras_planas,
+    _emparejar_grupos_opuestos,
     _analizar_envolvente,
     _caras_cilindricas,
     _agrupar_cilindros,
     _fusionar_avellanados,
     _asignar_taladros,
+    _plano_exterior,
     _dot,
+    _cruz,
     _resta,
     _norma,
+    _normalizar,
+    _escala,
+    _separacion_entre_planos,
     BARRIDO_MIN_TALADRO,
 )
 
@@ -214,23 +225,297 @@ def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0):
     return avisos
 
 
+# ── Paneles con forma (contorno no rectangular) ─────────────────────────────
+# Un mueble real trae paneles que NO son cajas de 6 caras: bordes inclinados
+# (armario bajo techo abuhardillado → pentágonos), esquinas redondeadas o
+# laterales curvos. Confirmado con STEP reales del taller (2876_6423: 13 de 26
+# sólidos eran paneles de 30mm con estas formas, no herraje). Para ellos, el
+# criterio de panel no es la caja completa sino el PAR DE GROSOR: dos caras
+# planas paralelas, grandes y muy próximas (el canto de tablero, 5-80mm). El
+# contorno real sale del wire exterior de la cara ancha, discretizado (líneas
+# exactas por sus vértices; arcos/splines muestreados a 0.05mm de flecha).
+# El BPP usa el panel envolvente rectangular; el DXF lleva la forma real.
+
+GROSOR_MIN_PANEL_FORMA = 5.0    # mm — por debajo no es tablero (chapa/lámina)
+GROSOR_MAX_PANEL_FORMA = 80.0   # mm — por encima no es tablero (bloque/macizo)
+DEFLECT_CONTORNO = 0.05         # mm — flecha máxima al discretizar curvas
+TOL_PUNTO_DUP = 1e-3            # mm — puntos consecutivos idénticos del wire
+
+
+def _discretizar_wire(wire):
+    """Puntos 3D ordenados del wire (cerrado, sin duplicar el último). Las
+    aristas rectas aportan sus vértices exactos; las curvas se muestrean con
+    flecha máxima DEFLECT_CONTORNO. Devuelve None si OCP falla."""
+    try:
+        puntos = []
+        exp = BRepTools_WireExplorer(wire.wrapped)
+        while exp.More():
+            edge = exp.Current()
+            adaptor = BRepAdaptor_Curve(edge)
+            u1, u2 = adaptor.FirstParameter(), adaptor.LastParameter()
+            if adaptor.GetType() == GeomAbs_CurveType.GeomAbs_Line:
+                pts = [adaptor.Value(u1), adaptor.Value(u2)]
+            else:
+                algo = GCPnts_QuasiUniformDeflection(adaptor, DEFLECT_CONTORNO, u1, u2)
+                if not algo.IsDone():
+                    return None
+                pts = [adaptor.Value(algo.Parameter(i)) for i in range(1, algo.NbPoints() + 1)]
+            if edge.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+                pts = list(reversed(pts))
+            for p in pts:
+                v = Vector(p.X(), p.Y(), p.Z())
+                if puntos and _norma(_resta(v, puntos[-1])) < TOL_PUNTO_DUP:
+                    continue
+                puntos.append(v)
+            exp.Next()
+        if len(puntos) >= 2 and _norma(_resta(puntos[0], puntos[-1])) < TOL_PUNTO_DUP:
+            puntos.pop()
+        return puntos if len(puntos) >= 3 else None
+    except Exception:
+        return None
+
+
+def _direccion_eje_contorno(wire, puntos, Z):
+    """Dirección X del marco local: entre las direcciones de las aristas
+    rectas del contorno, la que da la envolvente de MENOR ÁREA (criterio de
+    calibre giratorio — elegir la de máxima extensión escogía la diagonal en
+    piezas con esquinas cortadas). Con el eje elegido, X siempre es el lado
+    LARGO de la envolvente. Determinista (signo fijado como en analisis.py)."""
+    candidatas = []
+    try:
+        exp = BRepTools_WireExplorer(wire.wrapped)
+        while exp.More():
+            adaptor = BRepAdaptor_Curve(exp.Current())
+            if adaptor.GetType() == GeomAbs_CurveType.GeomAbs_Line:
+                a = adaptor.Value(adaptor.FirstParameter())
+                b = adaptor.Value(adaptor.LastParameter())
+                d = _resta(Vector(b.X(), b.Y(), b.Z()), Vector(a.X(), a.Y(), a.Z()))
+                if _norma(d) > TOL_PUNTO_DUP:
+                    candidatas.append(_normalizar(d))
+            exp.Next()
+    except Exception:
+        pass
+    if not candidatas:
+        # Contorno todo curvo: proyecciones de los ejes globales en el plano.
+        for eje_global in (Vector(1, 0, 0), Vector(0, 1, 0), Vector(0, 0, 1)):
+            d = _resta(eje_global, _escala(Z, _dot(eje_global, Z)))
+            if _norma(d) > 0.1:
+                candidatas.append(_normalizar(d))
+
+    def extension(d):
+        proys = [_dot(p, d) for p in puntos]
+        return max(proys) - min(proys)
+
+    def area_envolvente(d):
+        return extension(d) * extension(_cruz(Z, d))
+
+    mejor = min(candidatas, key=lambda d: (round(area_envolvente(d), 6), -extension(d)))
+    # X = el lado largo de la envolvente elegida.
+    perpendicular = _normalizar(_cruz(Z, mejor))
+    if extension(perpendicular) > extension(mejor):
+        mejor = perpendicular
+    puntuacion = 4 * mejor.z + 2 * mejor.y + mejor.x
+    return mejor if puntuacion >= 0 else _escala(mejor, -1)
+
+
+def _simplificar_colineales(puntos_2d):
+    """Elimina puntos intermedios de tramos rectos (|seno| < ~0.6°)."""
+    if len(puntos_2d) < 4:
+        return puntos_2d
+    resultado = []
+    n = len(puntos_2d)
+    for i in range(n):
+        x0, y0 = puntos_2d[i - 1]
+        x1, y1 = puntos_2d[i]
+        x2, y2 = puntos_2d[(i + 1) % n]
+        ax, ay = x1 - x0, y1 - y0
+        bx, by = x2 - x1, y2 - y1
+        na = (ax * ax + ay * ay) ** 0.5
+        nb = (bx * bx + by * by) ** 0.5
+        if na < TOL_PUNTO_DUP or nb < TOL_PUNTO_DUP:
+            continue
+        if abs(ax * by - ay * bx) / (na * nb) > 0.01:
+            resultado.append(puntos_2d[i])
+    return resultado
+
+
+def _es_contorno_rectangular(puntos_2d):
+    """True si el contorno (ya en 2D) es un rectángulo: 4 vértices tras
+    simplificar colineales y las 4 esquinas a ~90° (|cos| < 0.02)."""
+    pts = _simplificar_colineales(puntos_2d)
+    if len(pts) != 4:
+        return False
+    for i in range(4):
+        x0, y0 = pts[i - 1]
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % 4]
+        ax, ay = x1 - x0, y1 - y0
+        bx, by = x2 - x1, y2 - y1
+        na = (ax * ax + ay * ay) ** 0.5
+        nb = (bx * bx + by * by) ** 0.5
+        if na == 0 or nb == 0 or abs(ax * bx + ay * by) / (na * nb) > 0.02:
+            return False
+    return True
+
+
+def _analizar_panel_forma(solid, faces_planas, grupos):
+    """Fallback para paneles NO rectangulares. Devuelve el mismo dict que el
+    camino rectangular más 'contorno' (lista [x,y] en mm, cerrada, en el marco
+    local de la cara ancha), o None si el sólido no tiene par de grosor claro.
+    Los cajeados de las caras anchas SÍ se detectan (el filtro fondo-vs-pared
+    recibe las caras exteriores de TODOS los grupos, aunque solo se busque en
+    frontal/trasera)."""
+    pares, _ = _emparejar_grupos_opuestos(grupos)
+    if not pares:
+        return None
+    vertices = [Vector(*v.toTuple()) for v in solid.Vertices()]
+    bb = solid.BoundingBox()
+    dims = sorted([bb.xmax - bb.xmin, bb.ymax - bb.ymin, bb.zmax - bb.zmin], reverse=True)
+
+    candidatos = []
+    for gi, gj in pares:
+        sep = _separacion_entre_planos(vertices, grupos, gi, gj)
+        if not (GROSOR_MIN_PANEL_FORMA <= sep <= GROSOR_MAX_PANEL_FORMA):
+            continue
+        if sep > dims[1] * 0.5:
+            continue  # el grosor debe ser mucho menor que las otras dos dimensiones
+        area = sum(faces_planas[i].Area() for g in (gi, gj) for i in grupos[g]['indices'])
+        candidatos.append({'par': (gi, gj), 'sep': sep, 'area': area})
+    if not candidatos:
+        return None
+    elegido = max(candidatos, key=lambda c: c['area'])
+    gi, gj = elegido['par']
+
+    # Z = normal de la cara frontal, con signo determinista (como analisis.py).
+    z0 = grupos[gi]['normal']
+    puntuacion = 4 * z0.z + 2 * z0.y + z0.x
+    Z = z0 if puntuacion >= 0 else _escala(z0, -1)
+    g_frontal = gi if _dot(grupos[gi]['normal'], Z) > 0 else gj
+    g_trasera = gj if g_frontal == gi else gi
+
+    cara_frontal = max((faces_planas[i] for i in grupos[g_frontal]['indices']), key=lambda f: f.Area())
+    contorno3d = _discretizar_wire(cara_frontal.outerWire())
+    if contorno3d is None:
+        return None
+
+    X = _direccion_eje_contorno(cara_frontal.outerWire(), contorno3d, Z)
+    X = _normalizar(_resta(X, _escala(Z, _dot(X, Z))))
+    Y = _cruz(Z, X)
+
+    xs = [_dot(p, X) for p in contorno3d]
+    ys = [_dot(p, Y) for p in contorno3d]
+    x_min, y_min = min(xs), min(ys)
+    largo = round(max(xs) - x_min, 2)
+    ancho = round(max(ys) - y_min, 2)
+    grosor = round(elegido['sep'], 2)
+    contorno = [[round(x - x_min, 2), round(y - y_min, 2)] for x, y in zip(xs, ys)]
+
+    # Taladros: mismo pipeline, con un "env" reducido a las dos caras anchas —
+    # los taladros de los cantos con forma salen con cara None (solo tabla).
+    grupos_sub = [grupos[g_frontal], grupos[g_trasera]]
+    z_min = min(_dot(v, Z) for v in vertices)
+    env_sub = {
+        'nombres': {0: 'frontal', 1: 'trasera'},
+        'planos': {0: _plano_exterior(vertices, grupos_sub[0]['normal']),
+                   1: _plano_exterior(vertices, grupos_sub[1]['normal'])},
+        'eje': X, 'Y': Y, 'Z': Z,
+        'eje_min': x_min, 'y_min': y_min, 'z_min': z_min,
+        'ancho_y': ancho, 'grosor_z': grosor,
+    }
+    caras_cil = _caras_cilindricas(solid)
+    cilindros = _fusionar_avellanados(_agrupar_cilindros(caras_cil))
+    mayor_dim = max(ancho, grosor, 1.0)
+    validos = [c for c in cilindros
+               if c['barrido'] >= BARRIDO_MIN_TALADRO and c['radio'] * 2 <= mayor_dim * 1.5]
+    taladros = _asignar_taladros(validos, grupos_sub, env_sub)
+
+    # Cajeados en las caras anchas: env con TODOS los grupos (el filtro
+    # fondo-vs-pared necesita las caras exteriores de todos ellos), pero solo
+    # frontal/trasera llevan nombre de GRUPOS_CAJEADO — el resto ('lateral_k')
+    # no se explora, solo aporta sus aristas exteriores al filtro.
+    nombres_todos = {}
+    planos_todos = {}
+    for k, g in enumerate(grupos):
+        if k == g_frontal:
+            nombres_todos[k] = 'frontal'
+        elif k == g_trasera:
+            nombres_todos[k] = 'trasera'
+        else:
+            nombres_todos[k] = f'lateral_{k}'
+        planos_todos[k] = _plano_exterior(vertices, g['normal'])
+    env_cajeados = {**env_sub, 'nombres': nombres_todos, 'planos': planos_todos}
+    cajeados = _detectar_cajeados(faces_planas, grupos, env_cajeados)
+
+    avisos = _advertencias_panel(largo, ancho, grosor) + [
+        f'Panel con contorno NO rectangular ({len(contorno)} puntos) — el DXF lleva la forma real; '
+        f'largo/ancho ({largo:.0f}x{ancho:.0f}) y el BPP son el panel envolvente.'
+    ]
+    return {
+        'ok': True,
+        'largo': largo,
+        'ancho': ancho,
+        'grosor': grosor,
+        'seccion_regular': False,
+        'contorno': contorno,
+        'taladros': taladros,
+        'taladros_descartados': len(cilindros) - len(validos),
+        'cajeados': cajeados,
+        'advertencias': avisos,
+    }
+
+
 def analizar_solido_panel(solid):
     """Analiza un sólido como panel de tablero. Devuelve:
       {'ok': True, 'largo', 'ancho', 'grosor', 'seccion_regular',
-       'taladros', 'taladros_descartados', 'advertencias'}
-    o {'ok': False, 'motivo'} si el sólido no es una caja reconocible.
+       'taladros', 'taladros_descartados', 'cajeados', 'advertencias'}
+    (+ 'contorno' si el panel no es rectangular), o {'ok': False, 'motivo'}
+    si el sólido no tiene forma de panel.
     """
     faces_planas = [f for f in solid.Faces() if _es_plana(f)]
     if len(faces_planas) < 4:
         return {'ok': False, 'motivo': f'{len(faces_planas)} caras planas (insuficiente para un panel)'}
 
     grupos = _clusterizar_caras_planas(faces_planas)
+
     if len(grupos) > 6:
+        forma = _analizar_panel_forma(solid, faces_planas, grupos)
+        if forma is not None:
+            return forma
         return {'ok': False, 'motivo': f'{len(grupos)} direcciones de normal distintas (forma no soportada)'}
 
     env, motivo = _analizar_envolvente(solid, faces_planas, grupos)
     if env is None:
+        forma = _analizar_panel_forma(solid, faces_planas, grupos)
+        if forma is not None:
+            return forma
         return {'ok': False, 'motivo': motivo}
+
+    # ¿La cara ancha es DE VERDAD un rectángulo? La envolvente acepta formas
+    # que no lo son — paralelogramos (ambos cortes inclinados paralelos) o
+    # esquinas redondeadas (el eje sale ligeramente girado y largo/ancho dan
+    # MAL: 616×422 medidos para una pieza real de 600×400). La comprobación es
+    # directa sobre el wire exterior de la cara ancha exterior: 4 vértices
+    # tras simplificar colineales y esquinas a 90°. Si no lo es, mejor el
+    # contorno real; si la ruta de forma tampoco puede, se continúa con la
+    # envolvente y sus avisos (comportamiento anterior).
+    g_frontal = next((k for k, n in env['nombres'].items() if n == 'frontal'), None)
+    es_rectangular = True
+    if g_frontal is not None:
+        normal_f = grupos[g_frontal]['normal']
+        plano_f = env['planos'][g_frontal]
+        exteriores = [faces_planas[i] for i in grupos[g_frontal]['indices']
+                      if abs(_dot(Vector(*faces_planas[i].Center().toTuple()), normal_f) - plano_f) < 0.5]
+        if exteriores:
+            cara_ext = max(exteriores, key=lambda f: f.Area())
+            pts3d = _discretizar_wire(cara_ext.outerWire())
+            if pts3d is not None:
+                ejes_2d = (env['eje'], env['Y'])
+                pts2d = [(_dot(p, ejes_2d[0]), _dot(p, ejes_2d[1])) for p in pts3d]
+                es_rectangular = _es_contorno_rectangular(pts2d)
+    if not es_rectangular:
+        forma = _analizar_panel_forma(solid, faces_planas, grupos)
+        if forma is not None:
+            return forma
 
     caras_cil = _caras_cilindricas(solid)
     cilindros = _fusionar_avellanados(_agrupar_cilindros(caras_cil))

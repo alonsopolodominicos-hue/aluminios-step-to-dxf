@@ -67,7 +67,15 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     sep = 8 * t
 
     # ── Vista principal: contorno del panel 1:1 en el origen ────────────────
-    _rect(msp, 0, 0, L, A, 'CONTORNO')
+    # Con forma no rectangular, el contorno REAL (polilínea cerrada, curvas
+    # discretizadas a 0.05mm) más la envolvente en EJES como referencia.
+    contorno = analisis.get('contorno')
+    if contorno:
+        msp.add_lwpolyline([(p[0], p[1]) for p in contorno], close=True,
+                           dxfattribs={'layer': 'CONTORNO'})
+        _rect(msp, 0, 0, L, A, 'EJES')
+    else:
+        _rect(msp, 0, 0, L, A, 'CONTORNO')
 
     filas_tabla = []
     n_tag = 0
@@ -150,7 +158,8 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
                  dxfattribs={'layer': 'CAJETIN'})
     _texto(msp, nombre_capa, (t * 0.5, y0 + alto_caj - t * 1.4), t, capa='CAJETIN')
     unidad = UNIT_LABELS.get(insunits, 'mm')
-    _texto(msp, f'Panel {L:.1f} x {A:.1f} x {G:.1f} {unidad}', (t * 0.5, y0 + alto_caj - t * 3.2),
+    forma_txt = ' (envolvente — contorno real dibujado)' if contorno else ''
+    _texto(msp, f'Panel {L:.1f} x {A:.1f} x {G:.1f} {unidad}{forma_txt}', (t * 0.5, y0 + alto_caj - t * 3.2),
            t * 0.75, capa='CAJETIN')
     _texto(msp, f'Taladros: {len(taladros)}   Cajeados: {len(cajeados)}   '
                 f'Aluminios Cariñena   {date.today().strftime("%d/%m/%Y")}',

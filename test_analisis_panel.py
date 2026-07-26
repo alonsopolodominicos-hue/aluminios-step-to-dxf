@@ -289,17 +289,13 @@ def caso_ranura_abierta_a_canto():
           len(r['cajeados']) == 0, f"{r['cajeados']}")
 
 
-# ── Caso 16 (dato real): panel con borde anguloso (no rectangular) ──────────
+# ── Caso 16 (dato real): trapecio — ahora sale con contorno REAL ─────────────
 # Confirmado en un STEP real del taller (2876_6423): 3 de 13 piezas válidas de
-# un mismo montaje traían un canto en ángulo (3.6°-11.1°) — un filler/remate de
-# esquina, no un rectángulo. largo/ancho siguen siendo la caja envolvente (el
-# despiece solo maneja piezas rectangulares); lo único nuevo es avisar de que
-# la forma real NO es esa caja, para que se revise a mano antes de cortar.
+# un mismo montaje traían un canto en ángulo (3.6°-11.1°). Desde la ruta de
+# "panel con forma", estas piezas ya no se aproximan como rectángulo: el DXF
+# lleva su contorno real y largo/ancho son la envolvente (avisada).
 def caso_borde_angulado_avisa():
-    print('Caso 16 (dato real): panel con borde no rectangular (0°/45°) — avisa, no bloquea')
-    # Mismo trapecio validado en test_analisis.py::caso_trapecio (recto + inglete
-    # 45°), interpretado como panel: 400 de largo, 60 de ancho, 30 de grosor
-    # (el par lateral de MENOR separación, igual que en una barra).
+    print('Caso 16 (dato real): trapecio (recto + 45°) — contorno real, no rectángulo aproximado')
     panel = (
         cq.Workplane('XY')
         .polyline([(0, 0), (340, 0), (400, 60), (0, 60)]).close()
@@ -309,10 +305,67 @@ def caso_borde_angulado_avisa():
     check('ok', r['ok'], r.get('motivo', ''))
     if not r['ok']:
         return
-    check('largo 400 (envolvente, no la forma real)', aprox(r['largo'], 400, 0.5), f"{r['largo']}")
+    check('largo 400 (envolvente)', aprox(r['largo'], 400, 0.5), f"{r['largo']}")
     check('ancho 60, grosor 30', aprox(r['ancho'], 60) and aprox(r['grosor'], 30), f"{r['ancho']}, {r['grosor']}")
-    check('avisa de borde no rectangular (0°/45°)',
-          any('no rectangular' in a for a in r['advertencias']), f"{r['advertencias']}")
+    check('contorno real de 4 puntos (trapecio, no rectángulo)',
+          len(r.get('contorno', [])) == 4, f"{r.get('contorno')}")
+    check('avisa de contorno no rectangular',
+          any('NO rectangular' in a for a in r['advertencias']), f"{r['advertencias']}")
+
+
+# ── Casos 17-19: paneles con forma (contorno real) ──────────────────────────
+
+def caso_pentagono():
+    print('Caso 17: pentágono (esquina cortada) — contorno real de 5 puntos + taladro bien situado')
+    base = cq.Workplane('XY').box(600, 400, 18, centered=(False, False, False))
+    corte = cq.Workplane('XY').polyline([(500, 400), (600, 300), (600, 400)]).close().extrude(18).val()
+    pent = base.val().cut(corte)
+    con_taladro = (cq.Workplane('XY').newObject([pent])
+                   .faces('>Z').workplane(origin=(0, 0, 0)).pushPoints([(100, 100)]).hole(8, depth=10))
+    r = analizar(con_taladro)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    check('envolvente 600×400×18 (no la diagonal)',
+          aprox(r['largo'], 600) and aprox(r['ancho'], 400) and aprox(r['grosor'], 18, 0.3),
+          f"{r['largo']}, {r['ancho']}, {r['grosor']}")
+    contorno = r.get('contorno', [])
+    check('contorno de exactamente 5 puntos (líneas exactas por vértice)', len(contorno) == 5, f'{contorno}')
+    if len(contorno) == 5:
+        # El vértice (500,400) y el (600,300) del corte deben estar en el contorno.
+        tiene = lambda px, py: any(aprox(x, px) and aprox(y, py) for x, y in contorno)
+        check('vértices del corte presentes (500,400) y (600,300)', tiene(500, 400) and tiene(600, 300), f'{contorno}')
+    tal = r['taladros']
+    check('1 taladro frontal en x=100 y=100 (mismo marco que el contorno)',
+          len(tal) == 1 and tal[0]['cara'] in ('frontal', 'trasera')
+          and aprox(tal[0]['x'], 100) and aprox(tal[0]['y'], 100), f'{tal}')
+
+
+def caso_esquina_redondeada():
+    print('Caso 18: esquina redondeada (fillet r50) — contorno curvo discretizado, envolvente correcta')
+    panel = (cq.Workplane('XY').box(600, 400, 18, centered=(False, False, False))
+             .edges('|Z and >X and >Y').fillet(50))
+    r = analizar(panel)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    # Antes de la ruta de forma, la envolvente daba 616×422 (eje girado) — MAL.
+    check('envolvente exacta 600×400×18', aprox(r['largo'], 600) and aprox(r['ancho'], 400)
+          and aprox(r['grosor'], 18, 0.3), f"{r['largo']}, {r['ancho']}, {r['grosor']}")
+    contorno = r.get('contorno', [])
+    check('contorno con el arco discretizado (más de 8 puntos)', len(contorno) > 8, f'{len(contorno)} puntos')
+
+
+def caso_rectangulo_sin_contorno():
+    print('Caso 19: panel rectangular normal — NO lleva contorno (sigue la ruta de caja)')
+    panel = (cq.Workplane('XY').box(600, 400, 18, centered=(False, False, False))
+             .faces('>Z').workplane(origin=(0, 0, 0)).center(300, 200).rect(100, 80).cutBlind(-5))
+    r = analizar(panel)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    check('sin campo contorno (ruta rectangular intacta)', 'contorno' not in r, f"{list(r.keys())}")
+    check('el cajeado se sigue detectando por la ruta rectangular', len(r['cajeados']) == 1, f"{r['cajeados']}")
 
 
 if __name__ == '__main__':
@@ -322,7 +375,8 @@ if __name__ == '__main__':
                  caso_encimera_gruesa_sin_avisos, caso_liston_estrecho_sin_avisos,
                  caso_perfil_cuadrado_avisa, caso_panel_pequeño_cuadrado_sin_avisos,
                  caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
-                 caso_borde_angulado_avisa):
+                 caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
+                 caso_rectangulo_sin_contorno):
         caso()
         print()
     if FALLOS:
