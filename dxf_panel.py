@@ -33,6 +33,7 @@ CAPAS_PANEL = [
     ('TALADROS_OCULTOS', 8, 'DASHED'),
     ('FRESADO', 2, 'CONTINUOUS'),
     ('FRESADO_OCULTO', 30, 'DASHED'),
+    ('CANALES', 6, 'DASHED'),   # ranuras/cajeados en los CANTOS (no en la cara)
     ('EJES', 4, 'DASHDOT'),
     ('COTAS', 3, 'CONTINUOUS'),
     ('TEXTO', 7, 'CONTINUOUS'),
@@ -117,16 +118,47 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
                             y if y is not None else '—', f'Ø{d}', prof + extra))
 
     # ── Cajeados / ranuras ──────────────────────────────────────────────────
+    # En CARA (frontal/trasera): rectángulo a cota, en su posición real.
+    # En CANTO (superior/inferior/lateral_*): NO se puede dibujar como un
+    # rectángulo sobre la cara — sus coordenadas van a lo largo del canto y a
+    # través del GROSOR. Se marca el tramo del canto que lleva la canal (capa
+    # CANALES, discontinua) con topes en los extremos; la cota exacta (desde
+    # qué cara y a qué profundidad) va en la tabla.
+    n_canales = 0
     for caj in cajeados:
         n_tag += 1
         tag = f'T{n_tag}'
-        capa = 'FRESADO_OCULTO' if caj['cara'] == 'trasera' else 'FRESADO'
         x0, y0 = caj['x'], caj['y']
-        _rect(msp, x0, y0, x0 + caj['largo'], y0 + caj['ancho'], capa)
-        _texto(msp, tag, (x0 + caj['largo'] + t * 0.3, y0), t * 0.7, capa=capa)
-        filas_tabla.append((tag, caj['cara'], x0, y0,
-                            f"{caj['forma']} {caj['largo']:.0f}x{caj['ancho']:.0f}",
-                            f"prof. {caj['profundidad']}"))
+        cara = caj['cara']
+        etiqueta_medida = f"{caj['forma']} {caj['largo']:.0f}x{caj['ancho']:.0f}"
+
+        if not caj.get('en_canto'):
+            capa = 'FRESADO_OCULTO' if cara == 'trasera' else 'FRESADO'
+            _rect(msp, x0, y0, x0 + caj['largo'], y0 + caj['ancho'], capa)
+            _texto(msp, tag, (x0 + caj['largo'] + t * 0.3, y0), t * 0.7, capa=capa)
+            filas_tabla.append((tag, cara, x0, y0, etiqueta_medida, f"prof. {caj['profundidad']}"))
+            continue
+
+        n_canales += 1
+        off = t * 0.5   # separación visual respecto al borde real
+        x1 = x0 + caj['largo']
+        if cara in ('superior', 'inferior'):
+            # x del análisis corre a lo largo del LARGO del panel.
+            yb = A - off if cara == 'superior' else off
+            msp.add_line((x0, yb), (x1, yb), dxfattribs={'layer': 'CANALES'})
+            for xe in (x0, x1):
+                msp.add_line((xe, yb - off * 0.6), (xe, yb + off * 0.6), dxfattribs={'layer': 'CANALES'})
+            pos_tag = ((x0 + x1) / 2, yb + (off if cara == 'inferior' else -off * 2))
+        else:
+            # lateral_iz/de: la x del análisis corre a lo ANCHO del panel.
+            xb = off if cara == 'lateral_iz' else L - off
+            msp.add_line((xb, x0), (xb, x1), dxfattribs={'layer': 'CANALES'})
+            for ye in (x0, x1):
+                msp.add_line((xb - off * 0.6, ye), (xb + off * 0.6, ye), dxfattribs={'layer': 'CANALES'})
+            pos_tag = (xb + (off if cara == 'lateral_iz' else -off * 4), (x0 + x1) / 2)
+        _texto(msp, tag, pos_tag, t * 0.7, capa='CANALES')
+        filas_tabla.append((tag, f'{cara} (CANTO)', x0, y0, etiqueta_medida,
+                            f"prof. {caj['profundidad']} — a {y0} de cara frontal"))
 
     # ── Cotas generales ─────────────────────────────────────────────────────
     _cota_lineal(msp, (0, 0), (L, 0), (L / 2, -sep * 0.35), t)
@@ -161,7 +193,8 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     forma_txt = ' (envolvente — contorno real dibujado)' if contorno else ''
     _texto(msp, f'Panel {L:.1f} x {A:.1f} x {G:.1f} {unidad}{forma_txt}', (t * 0.5, y0 + alto_caj - t * 3.2),
            t * 0.75, capa='CAJETIN')
-    _texto(msp, f'Taladros: {len(taladros)}   Cajeados: {len(cajeados)}   '
+    _texto(msp, f'Taladros: {len(taladros)}   Cajeados en cara: {len(cajeados) - n_canales}   '
+                f'Canales en canto: {n_canales}   '
                 f'Aluminios Cariñena   {date.today().strftime("%d/%m/%Y")}',
            (t * 0.5, y0 + t * 0.7), t * 0.75, capa='CAJETIN')
 

@@ -71,11 +71,10 @@ from analisis import (
 
 RENOMBRE_CARA = {'extremo_a': 'lateral_iz', 'extremo_b': 'lateral_de'}
 
-# Solo se busca en las caras anchas — nunca en los cantos cortos
-# (lateral_iz/lateral_de) — para reducir el riesgo de confundir la pared de un
-# bolsillo cortado desde un canto con un cajeado real; los cajeados/ranuras de
-# canto (mucho más raros en tablero) quedan fuera de esta primera versión.
-GRUPOS_CAJEADO = ('frontal', 'trasera', 'superior', 'inferior')
+# Se busca en las seis caras del panel: las anchas y los cuatro cantos. Las
+# canales de encaje (trasera/fondo) van SIEMPRE en canto — dejarlas fuera
+# perdía el mecanizado más común del mueble real.
+GRUPOS_CAJEADO = ('frontal', 'trasera', 'superior', 'inferior', 'lateral_iz', 'lateral_de')
 PROFUNDIDAD_MIN_CAJEADO = 0.5   # mm — por debajo es ruido numérico, no un cajeado real
 AREA_MIN_CAJEADO = 20.0         # mm² — descarta fragmentos/virutas de geometría
 TOL_ARISTA_COMPARTIDA = 0.1     # mm — distancia entre extremos para considerar la misma arista
@@ -118,10 +117,23 @@ def _toca_alguna_cara_exterior(face, segmentos_exteriores):
 
 
 def _detectar_cajeados(faces_planas, grupos, env):
-    """Bolsillos/ranuras rectangulares (no cilíndricos) en las caras anchas.
-    Devuelve una lista de dicts {cara, forma, x, y, largo, ancho, profundidad}
-    — x,y = esquina inferior-izquierda del rectángulo en el marco local de la
-    cara (misma convención que los taladros)."""
+    """Bolsillos/ranuras rectangulares (no cilíndricos) en cualquier cara del
+    panel: las anchas (frontal/trasera) y TAMBIÉN los cuatro cantos — las
+    "canales" de encaje de trasera/fondo son ranuras de canto y son de las
+    más habituales en un mueble real (confirmado con STEP del taller: un mismo
+    panel llevaba canal en los cuatro cantos).
+
+    Devuelve dicts {cara, forma, en_canto, x, y, largo, ancho, profundidad}.
+    x,y = esquina inferior-izquierda en el marco local de SU cara (misma
+    convención que los taladros):
+      - frontal/trasera : x a lo largo del largo, y desde el borde inferior.
+      - superior/inferior: x a lo largo del largo, y desde la cara frontal
+        (o sea, a través del GROSOR).
+      - lateral_iz/de   : x desde el borde inferior (a lo ancho), y desde la
+        cara frontal (a través del grosor).
+    `en_canto` marca las tres últimas: NO son mecanizables como bolsillo de
+    cara — quien consuma esto debe tratarlas aparte (ver dxf_panel.py y
+    despieceDesdeStepPanel.ts)."""
     # Segmentos de TODAS las caras exteriores (de todos los grupos): una
     # pared de bolsillo comparte una arista con la superficie original de
     # ALGÚN grupo (no necesariamente el suyo propio, ver docstring del módulo).
@@ -136,7 +148,9 @@ def _detectar_cajeados(faces_planas, grupos, env):
 
     resultado = []
     for k, grupo in enumerate(grupos):
-        nombre = env['nombres'].get(k)
+        # env['nombres'] viene de _analizar_envolvente con la nomenclatura de
+        # barra (extremo_a/b) — aquí ya se usa la de panel (lateral_iz/de).
+        nombre = RENOMBRE_CARA.get(env['nombres'].get(k), env['nombres'].get(k))
         if nombre not in GRUPOS_CAJEADO:
             continue
         normal = grupo['normal']
@@ -157,10 +171,18 @@ def _detectar_cajeados(faces_planas, grupos, env):
             vs = [Vector(*v.toTuple()) for v in f.Vertices()]
             if not vs:
                 continue
-            eje_dir = env['Z'] if nombre in ('superior', 'inferior') else env['Y']
-            eje_min_dir = env['z_min'] if nombre in ('superior', 'inferior') else env['y_min']
-            xs = [_dot(v, env['eje']) - env['eje_min'] for v in vs]
-            ys = [_dot(v, eje_dir) - eje_min_dir for v in vs]
+            # Ejes locales de ESTA cara (ver docstring).
+            if nombre in ('frontal', 'trasera'):
+                dir_x, min_x = env['eje'], env['eje_min']
+                dir_y, min_y = env['Y'], env['y_min']
+            elif nombre in ('superior', 'inferior'):
+                dir_x, min_x = env['eje'], env['eje_min']
+                dir_y, min_y = env['Z'], env['z_min']
+            else:  # lateral_iz / lateral_de
+                dir_x, min_x = env['Y'], env['y_min']
+                dir_y, min_y = env['Z'], env['z_min']
+            xs = [_dot(v, dir_x) - min_x for v in vs]
+            ys = [_dot(v, dir_y) - min_y for v in vs]
             x0, x1 = min(xs), max(xs)
             y0, y1 = min(ys), max(ys)
             largo, ancho = x1 - x0, y1 - y0
@@ -169,6 +191,7 @@ def _detectar_cajeados(faces_planas, grupos, env):
             forma = 'ranura' if min(largo, ancho) < UMBRAL_RANURA_ANCHO else 'cajeado'
             resultado.append({
                 'cara': nombre, 'forma': forma,
+                'en_canto': nombre != 'frontal' and nombre != 'trasera',
                 'x': round(x0, 2), 'y': round(y0, 2),
                 'largo': round(largo, 2), 'ancho': round(ancho, 2),
                 'profundidad': round(profundidad, 2),
