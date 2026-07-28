@@ -261,7 +261,10 @@ def _detectar_canales_perimetro(solid, env, contorno):
             'curvo': f.geomType() != 'PLANE',
             'oblicuo': abs(abs(nx) - 1) > 1e-3 and abs(abs(ny) - 1) > 1e-3,
             'abierto_a': abierto,
-            'x': round(min(p[0] for p in puntos), 2),
+            # x = arranque A LO LARGO del canto (convención de los mecanizados
+            # de canto, ver docstring de _detectar_cajeados): en los cantos
+            # largos corre con el largo del panel y en los cortos, con el ancho.
+            'x': round(min(p[1] if abs(nx) > abs(ny) else p[0] for p in puntos), 2),
             'y': round(z0, 2),
             'largo': round(largo, 2),
             'ancho': round(z1 - z0, 2),
