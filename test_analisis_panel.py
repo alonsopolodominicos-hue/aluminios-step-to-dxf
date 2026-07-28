@@ -404,13 +404,16 @@ def caso_canal_entra_desde_el_borde():
     print('Caso 18: la canal de canto entra desde el borde, no se apoya en él')
     from dxf_panel import generar_dxf_panel
     L, A, P = 800.0, 400.0, 30.0
+    # `puntos` = traza real del fondo en planta, tal como la da el análisis.
     r = {
         'ok': True, 'largo': L, 'ancho': A, 'grosor': P, 'taladros': [],
         'cajeados': [
             {'cara': 'inferior',   'x': 0.0, 'y': 10.0, 'largo': L, 'ancho': 10.0,
-             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True},
+             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True,
+             'puntos': [(0.0, 16.5), (L, 16.5)], 'normal': [0.0, -1.0]},
             {'cara': 'lateral_de', 'x': 0.0, 'y': 10.0, 'largo': A, 'ancho': 10.0,
-             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True},
+             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True,
+             'puntos': [(L - 16.5, 0.0), (L - 16.5, A)], 'normal': [1.0, 0.0]},
         ],
     }
     bandas = [[(round(x, 2), round(y, 2)) for x, y, *_ in e.get_points()]
@@ -423,13 +426,63 @@ def caso_canal_entra_desde_el_borde():
     check('las bandas quedan abiertas hacia el canto',
           all(not e.closed for e in
               generar_dxf_panel('prueba', r).modelspace().query('LWPOLYLINE[layer=="CANALES"]')))
-    # Canal inferior: arranca en y=0 (el borde) y entra hasta y=16.5.
-    check('la canal inferior toca el borde y=0', min(y for _, y in inf) == 0.0, f'{inf}')
-    check('y entra 16.5 hacia dentro', max(y for _, y in inf) == 16.5, f'{inf}')
-    check('no se sale del panel a lo ancho', max(y for _, y in inf) < A, f'{inf}')
-    # Canal lateral derecha: arranca en x=L y entra hacia dentro (x decreciente).
-    check(f'la canal lateral_de toca el borde x={L:.0f}', max(x for x, _ in der) == L, f'{der}')
-    check('y entra 16.5 hacia dentro', min(x for x, _ in der) == L - 16.5, f'{der}')
+    # El fondo de la canal inferior va a 16.5 del borde y=0, no encima de él.
+    check('el fondo de la canal inferior está a 16.5 del borde',
+          all(abs(y - 16.5) < 0.01 for _, y in inf), f'{inf}')
+    check('no se sale del panel', max(y for _, y in inf) < A, f'{inf}')
+    # Y la lateral derecha, a 16.5 del borde x=L.
+    check(f'el fondo de la lateral_de está a 16.5 del borde x={L:.0f}',
+          all(abs(x - (L - 16.5)) < 0.01 for x, _ in der), f'{der}')
+    # Conectores hasta la línea de corte por los dos extremos de cada canal.
+    lineas = list(generar_dxf_panel('prueba', r).modelspace().query('LINE[layer=="CANALES"]'))
+    check('cada canal se remata contra el corte por sus dos extremos',
+          len(lineas) == 4, f'{len(lineas)} conectores')
+
+
+# ── Caso 19: canal en un panel NO rectangular ───────────────────────────────
+# El fallo que hacía que casi todas las piezas reales salieran sin mecanizar:
+# los cantos se buscaban POR NOMBRE (superior/inferior/lateral_*), y un panel
+# con un borde en ángulo no tiene esos cantos, así que se saltaba entero. En el
+# montaje 2876_6426 eran 12 de 16 piezas.
+def caso_canal_en_panel_con_forma():
+    print('Caso 19: la canal se detecta también en un panel no rectangular')
+    L, A, P = 800.0, 400.0, 30.0
+    # Panel con una esquina cortada en diagonal + canal perimetral de 16.5x10.
+    base = (cq.Workplane('XY')
+            .polyline([(0, 0), (L, 0), (L, A - 150), (L - 200, A), (0, A)]).close()
+            .extrude(P))
+    canal = (cq.Workplane('XY').workplane(offset=10.0)
+             .rect(L * 2, A * 2, centered=True).extrude(10.0)
+             .cut(cq.Workplane('XY').workplane(offset=10.0)
+                  .polyline([(16.5, 16.5), (L - 16.5, 16.5), (L - 16.5, A - 150),
+                             (L - 200, A - 16.5), (16.5, A - 16.5)]).close().extrude(10.0)))
+    r = analizar(base.cut(canal))
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    check('el panel sale con contorno propio', bool(r.get('contorno')), 'sin contorno')
+    canales = [c for c in r.get('cajeados', []) if c.get('en_canto') and c['forma'] == 'ranura']
+    check('detecta canal en el panel con forma', len(canales) >= 3, f'{len(canales)} canales')
+    if not canales:
+        return
+    # Los cuatro cantos rectos van a 16.5 exactos. El de la diagonal NO: el
+    # polígono interior de esta pieza de prueba se construye desplazando los
+    # vértices, que en un borde oblicuo no da un paralelo — ahí la canal mide
+    # menos de verdad, y el análisis debe decir lo que hay, no 16.5.
+    rectas = [c for c in canales if not c['oblicuo']]
+    check('los cantos rectos dan la profundidad exacta (16.5)',
+          len(rectas) >= 4 and all(abs(c['profundidad'] - 16.5) < 0.1 for c in rectas),
+          str([c['profundidad'] for c in rectas]))
+    check('ninguna profundidad es mayor que el retranqueo pedido',
+          all(0 < c['profundidad'] <= 16.6 for c in canales),
+          str([c['profundidad'] for c in canales]))
+    check('y con traza en planta para poder dibujarla',
+          all(len(c.get('puntos', [])) >= 2 for c in canales))
+    # Ninguna canal puede quedarse en 'frontal': el lado TS lo tomaría por un
+    # fresado de CARA y lo metería en el .bpp — estropearía la pieza.
+    check('ninguna canal se etiqueta como cara ancha',
+          all(c['cara'] not in ('frontal', 'trasera') for c in canales),
+          str([c['cara'] for c in canales]))
 
 
 if __name__ == '__main__':
@@ -441,7 +494,7 @@ if __name__ == '__main__':
                  caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
                  caso_rectangulo_sin_contorno, caso_escala_de_linea,
-                 caso_canal_entra_desde_el_borde):
+                 caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma):
         caso()
         print()
     if FALLOS:

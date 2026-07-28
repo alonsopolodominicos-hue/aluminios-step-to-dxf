@@ -38,11 +38,32 @@ CAPAS_PANEL = [
     ('FRESADO', 5, 'CONTINUOUS'),           # azul — cajeado en la cara vista
     ('FRESADO_OCULTO', 30, 'DASHED'),       # naranja — cajeado en la trasera
     ('CANALES', 6, 'DASHED'),               # magenta — ranuras en los CANTOS
+    ('GALCES', 30, 'CONTINUOUS'),           # naranja — galce/rebaje de canto abierto a la cara vista
+    ('GALCES_OCULTO', 30, 'DASHED'),        # ... y abierto a la cara de atrás
     ('EJES', 4, 'DASHDOT'),
     ('COTAS', 3, 'CONTINUOUS'),
     ('TEXTO', 7, 'CONTINUOUS'),
     ('CAJETIN', 7, 'CONTINUOUS'),
 ]
+
+
+def _mas_cercano(punto, polilinea):
+    """Punto de la polilínea cerrada más próximo a `punto`. Se usa para llevar
+    los extremos de una canal hasta la línea de corte sin suponer que el canto
+    es recto."""
+    px, py = punto
+    mejor, dmin = polilinea[0], float('inf')
+    for i in range(len(polilinea)):
+        ax, ay = polilinea[i]
+        bx, by = polilinea[(i + 1) % len(polilinea)]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+        qx, qy = ax + t * dx, ay + t * dy
+        d = (px - qx) ** 2 + (py - qy) ** 2
+        if d < dmin:
+            mejor, dmin = (qx, qy), d
+    return mejor
 
 
 def _rect(msp, x0, y0, x1, y1, capa):
@@ -138,7 +159,12 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     # trazo discontinuo porque queda enterrada dentro del grosor. Así se puede
     # medir en el CAD. Lo único que la planta no puede mostrar es a qué altura
     # del grosor está — esa cota va en la tabla.
+    # Línea de corte contra la que se apoyan las canales: el contorno real si
+    # la pieza tiene forma, y si no la propia caja envolvente.
+    contorno_ref = ([(pt[0], pt[1]) for pt in contorno] if contorno
+                    else [(0.0, 0.0), (L, 0.0), (L, A), (0.0, A)])
     n_canales = 0
+    n_galces = 0
     for caj in cajeados:
         n_tag += 1
         tag = f'T{n_tag}'
@@ -153,28 +179,34 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
             filas_tabla.append((tag, cara, x0, y0, etiqueta_medida, f"prof. {caj['profundidad']}"))
             continue
 
-        n_canales += 1
-        p = caj['profundidad']          # lo que entra el disco desde el canto
-        x1 = x0 + caj['largo']
-        if cara == 'superior':          # borde y=A; x del análisis = largo del panel
-            pts = [(x0, A), (x0, A - p), (x1, A - p), (x1, A)]
-            pos_tag = ((x0 + x1) / 2, A + t * 0.4)
-        elif cara == 'inferior':        # borde y=0
-            pts = [(x0, 0), (x0, p), (x1, p), (x1, 0)]
-            pos_tag = ((x0 + x1) / 2, -t * 1.3)
-        elif cara == 'lateral_iz':      # borde x=0; x del análisis = ancho del panel
-            pts = [(0, x0), (p, x0), (p, x1), (0, x1)]
-            pos_tag = (-t * 2.0, (x0 + x1) / 2)
-        else:                           # lateral_de, borde x=L
-            pts = [(L, x0), (L - p, x0), (L - p, x1), (L, x1)]
-            pos_tag = (L + t * 0.5, (x0 + x1) / 2)
-        # Polilínea ABIERTA: el lado que da al canto no se cierra — ahí no hay
-        # material, es la boca de la canal. Cerrarla dibujaría un trazo
-        # discontinuo justo encima del contorno de corte y lo haría dudoso.
-        msp.add_lwpolyline(pts, close=False, dxfattribs={'layer': 'CANALES'})
-        _texto(msp, tag, pos_tag, t * 0.7, capa='CANALES')
-        filas_tabla.append((tag, f'{cara} (CANTO)', x0, y0, etiqueta_medida,
-                            f"entra {p} en el canto — a {y0} de cara frontal"))
+        # Traza REAL del fondo, tal cual sale de la geometría del sólido: sirve
+        # igual para un canto recto que para uno curvo (estas piezas llevan
+        # cantos de radio 859-4590 mm con galce). Sin ella no se puede dibujar.
+        pts = [tuple(q) for q in caj.get('puntos', [])]
+        if len(pts) < 2:
+            continue
+        p = caj['profundidad']
+        if caj['forma'] == 'ranura':
+            n_canales += 1
+            capa = 'CANALES'
+            etiqueta_medida = f"canal {caj['largo']:.0f} largo"
+            detalle = f"{caj['ancho']} de ancho, entra {p} — a {y0} de la cara trasera"
+        else:
+            n_galces += 1
+            capa = 'GALCES_OCULTO' if caj.get('abierto_a') == 'trasera' else 'GALCES'
+            etiqueta_medida = f"galce {caj['largo']:.0f} largo"
+            detalle = f"{p} de ancho x {caj['ancho']} de hondo, desde la cara {caj.get('abierto_a')}"
+        # Polilínea ABIERTA y dos conectores hasta la línea de corte: el lado
+        # que da al canto no se cierra — ahí no hay material, es la boca. Los
+        # conectores van al punto MÁS CERCANO del contorno, no en la dirección
+        # de la normal, que en un canto curvo no es constante.
+        msp.add_lwpolyline(pts, close=False, dxfattribs={'layer': capa})
+        for extremo in (pts[0], pts[-1]):
+            msp.add_line(extremo, _mas_cercano(extremo, contorno_ref), dxfattribs={'layer': capa})
+        medio = pts[len(pts) // 2]
+        _texto(msp, tag, (medio[0] + t * 0.3, medio[1] + t * 0.3), t * 0.7, capa=capa)
+        filas_tabla.append((tag, f'{cara} (CANTO)', round(medio[0], 1), round(medio[1], 1),
+                            etiqueta_medida, detalle))
 
     # ── Cotas generales ─────────────────────────────────────────────────────
     _cota_lineal(msp, (0, 0), (L, 0), (L / 2, -sep * 0.35), t)
@@ -209,8 +241,9 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     forma_txt = ' (envolvente — contorno real dibujado)' if contorno else ''
     _texto(msp, f'Panel {L:.1f} x {A:.1f} x {G:.1f} {unidad}{forma_txt}', (t * 0.5, y0 + alto_caj - t * 3.2),
            t * 0.75, capa='CAJETIN')
-    _texto(msp, f'Taladros: {len(taladros)}   Cajeados en cara: {len(cajeados) - n_canales}   '
-                f'Canales en canto: {n_canales}   '
+    _texto(msp, f'Taladros: {len(taladros)}   '
+                f'Cajeados en cara: {len(cajeados) - n_canales - n_galces}   '
+                f'Canales en canto: {n_canales}   Galces de canto: {n_galces}   '
                 f'Aluminios Cariñena   {date.today().strftime("%d/%m/%Y")}',
            (t * 0.5, y0 + t * 0.7), t * 0.75, capa='CAJETIN')
 
