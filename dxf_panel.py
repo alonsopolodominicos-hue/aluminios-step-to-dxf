@@ -131,11 +131,13 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
 
     # ── Cajeados / ranuras ──────────────────────────────────────────────────
     # En CARA (frontal/trasera): rectángulo a cota, en su posición real.
-    # En CANTO (superior/inferior/lateral_*): NO se puede dibujar como un
-    # rectángulo sobre la cara — sus coordenadas van a lo largo del canto y a
-    # través del GROSOR. Se marca el tramo del canto que lleva la canal (capa
-    # CANALES, discontinua) con topes en los extremos; la cota exacta (desde
-    # qué cara y a qué profundidad) va en la tabla.
+    # En CANTO (superior/inferior/lateral_*): la canal NO se apoya sobre la
+    # línea del canto — entra HACIA DENTRO del panel su profundidad real. En
+    # planta se ve como la banda de material que el disco se ha llevado: se
+    # dibuja abierta al borde (solo los dos topes y la línea de fondo), en
+    # trazo discontinuo porque queda enterrada dentro del grosor. Así se puede
+    # medir en el CAD. Lo único que la planta no puede mostrar es a qué altura
+    # del grosor está — esa cota va en la tabla.
     n_canales = 0
     for caj in cajeados:
         n_tag += 1
@@ -152,25 +154,27 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
             continue
 
         n_canales += 1
-        off = t * 0.5   # separación visual respecto al borde real
+        p = caj['profundidad']          # lo que entra el disco desde el canto
         x1 = x0 + caj['largo']
-        if cara in ('superior', 'inferior'):
-            # x del análisis corre a lo largo del LARGO del panel.
-            yb = A - off if cara == 'superior' else off
-            msp.add_line((x0, yb), (x1, yb), dxfattribs={'layer': 'CANALES'})
-            for xe in (x0, x1):
-                msp.add_line((xe, yb - off * 0.6), (xe, yb + off * 0.6), dxfattribs={'layer': 'CANALES'})
-            pos_tag = ((x0 + x1) / 2, yb + (off if cara == 'inferior' else -off * 2))
-        else:
-            # lateral_iz/de: la x del análisis corre a lo ANCHO del panel.
-            xb = off if cara == 'lateral_iz' else L - off
-            msp.add_line((xb, x0), (xb, x1), dxfattribs={'layer': 'CANALES'})
-            for ye in (x0, x1):
-                msp.add_line((xb - off * 0.6, ye), (xb + off * 0.6, ye), dxfattribs={'layer': 'CANALES'})
-            pos_tag = (xb + (off if cara == 'lateral_iz' else -off * 4), (x0 + x1) / 2)
+        if cara == 'superior':          # borde y=A; x del análisis = largo del panel
+            pts = [(x0, A), (x0, A - p), (x1, A - p), (x1, A)]
+            pos_tag = ((x0 + x1) / 2, A + t * 0.4)
+        elif cara == 'inferior':        # borde y=0
+            pts = [(x0, 0), (x0, p), (x1, p), (x1, 0)]
+            pos_tag = ((x0 + x1) / 2, -t * 1.3)
+        elif cara == 'lateral_iz':      # borde x=0; x del análisis = ancho del panel
+            pts = [(0, x0), (p, x0), (p, x1), (0, x1)]
+            pos_tag = (-t * 2.0, (x0 + x1) / 2)
+        else:                           # lateral_de, borde x=L
+            pts = [(L, x0), (L - p, x0), (L - p, x1), (L, x1)]
+            pos_tag = (L + t * 0.5, (x0 + x1) / 2)
+        # Polilínea ABIERTA: el lado que da al canto no se cierra — ahí no hay
+        # material, es la boca de la canal. Cerrarla dibujaría un trazo
+        # discontinuo justo encima del contorno de corte y lo haría dudoso.
+        msp.add_lwpolyline(pts, close=False, dxfattribs={'layer': 'CANALES'})
         _texto(msp, tag, pos_tag, t * 0.7, capa='CANALES')
         filas_tabla.append((tag, f'{cara} (CANTO)', x0, y0, etiqueta_medida,
-                            f"prof. {caj['profundidad']} — a {y0} de cara frontal"))
+                            f"entra {p} en el canto — a {y0} de cara frontal"))
 
     # ── Cotas generales ─────────────────────────────────────────────────────
     _cota_lineal(msp, (0, 0), (L, 0), (L / 2, -sep * 0.35), t)

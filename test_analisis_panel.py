@@ -395,6 +395,43 @@ def caso_escala_de_linea():
               trazo > 10, f'{trazo:.1f} mm')
 
 
+# ── Caso 18: la canal de canto no se apoya sobre el contorno ────────────────
+# Una canal de canto se dibujaba como una rayita a un offset decorativo del
+# borde, así que en el CAD parecía ir "encima del canto" y no se podía medir.
+# Es material que el disco se lleva ENTRANDO en el panel: en planta tiene que
+# arrancar exactamente en el borde y meterse su profundidad real.
+def caso_canal_entra_desde_el_borde():
+    print('Caso 18: la canal de canto entra desde el borde, no se apoya en él')
+    from dxf_panel import generar_dxf_panel
+    L, A, P = 800.0, 400.0, 30.0
+    r = {
+        'ok': True, 'largo': L, 'ancho': A, 'grosor': P, 'taladros': [],
+        'cajeados': [
+            {'cara': 'inferior',   'x': 0.0, 'y': 10.0, 'largo': L, 'ancho': 10.0,
+             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True},
+            {'cara': 'lateral_de', 'x': 0.0, 'y': 10.0, 'largo': A, 'ancho': 10.0,
+             'profundidad': 16.5, 'forma': 'ranura', 'en_canto': True},
+        ],
+    }
+    bandas = [[(round(x, 2), round(y, 2)) for x, y, *_ in e.get_points()]
+              for e in generar_dxf_panel('prueba', r).modelspace().query('LWPOLYLINE[layer=="CANALES"]')]
+    check('se dibuja una banda por canal', len(bandas) == 2, f'{len(bandas)}')
+    if len(bandas) != 2:
+        return
+    inf, der = bandas
+    # Abiertas: cerrarlas pondría un trazo discontinuo sobre la línea de corte.
+    check('las bandas quedan abiertas hacia el canto',
+          all(not e.closed for e in
+              generar_dxf_panel('prueba', r).modelspace().query('LWPOLYLINE[layer=="CANALES"]')))
+    # Canal inferior: arranca en y=0 (el borde) y entra hasta y=16.5.
+    check('la canal inferior toca el borde y=0', min(y for _, y in inf) == 0.0, f'{inf}')
+    check('y entra 16.5 hacia dentro', max(y for _, y in inf) == 16.5, f'{inf}')
+    check('no se sale del panel a lo ancho', max(y for _, y in inf) < A, f'{inf}')
+    # Canal lateral derecha: arranca en x=L y entra hacia dentro (x decreciente).
+    check(f'la canal lateral_de toca el borde x={L:.0f}', max(x for x, _ in der) == L, f'{der}')
+    check('y entra 16.5 hacia dentro', min(x for x, _ in der) == L - 16.5, f'{der}')
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -403,7 +440,8 @@ if __name__ == '__main__':
                  caso_perfil_cuadrado_avisa, caso_panel_pequeño_cuadrado_sin_avisos,
                  caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
-                 caso_rectangulo_sin_contorno, caso_escala_de_linea):
+                 caso_rectangulo_sin_contorno, caso_escala_de_linea,
+                 caso_canal_entra_desde_el_borde):
         caso()
         print()
     if FALLOS:
