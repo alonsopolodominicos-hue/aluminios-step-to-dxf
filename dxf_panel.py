@@ -71,6 +71,14 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     t = max(min(L, A) * 0.03, 6.0)
     sep = 8 * t
 
+    # Escala de los tipos de línea, PROPORCIONAL A LA PIEZA. El patrón DASHED
+    # mide 1,27 mm: con la escala por defecto (1.0) sobre un panel de 2450 mm
+    # los trazos son 1/1900 del dibujo y el CAD los pinta como una línea
+    # fantasma — o no los pinta. Como el mecanizado vive precisamente en las
+    # capas discontinuas (CANALES y los fresados de la cara oculta), el plano
+    # parecía salir SIN mecanizar. Con esto los trazos miden ~2 cm y se ven.
+    doc.header['$LTSCALE'] = round(t / 2, 2)
+
     # ── Vista principal: contorno del panel 1:1 en el origen ────────────────
     # Con forma no rectangular, el contorno REAL (polilínea cerrada, curvas
     # discretizadas a 0.05mm) más la envolvente en EJES como referencia.

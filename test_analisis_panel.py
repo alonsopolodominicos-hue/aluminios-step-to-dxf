@@ -368,6 +368,33 @@ def caso_rectangulo_sin_contorno():
     check('el cajeado se sigue detectando por la ruta rectangular', len(r['cajeados']) == 1, f"{r['cajeados']}")
 
 
+# ── Caso 17: el plano debe VERSE ────────────────────────────────────────────
+# Todo el mecanizado (canales y fresados de la cara oculta) va en capas
+# DISCONTINUAS. Con la escala de línea por defecto los trazos miden 1,3 mm y
+# en un panel de 2450 mm el CAD no los pinta: el plano parecía salir sin
+# mecanizar aunque las entidades estuvieran ahí.
+def caso_escala_de_linea():
+    print('Caso 17: la línea discontinua se ve a la escala de la pieza')
+    import io as _io, re as _re
+    from dxf_panel import generar_dxf_panel
+    panel = (
+        cq.Workplane('XY').box(2450, 1160, 30, centered=(False, False, False))
+        .faces('>Z').workplane(origin=(0, 0, 0)).center(1200, 580).rect(200, 100).cutBlind(-8)
+    )
+    r = analizar(panel)
+    check('ok', r['ok'], r.get('motivo', ''))
+    if not r['ok']:
+        return
+    doc = generar_dxf_panel('prueba', r)
+    buf = _io.StringIO(); doc.write(buf)
+    m = _re.search(r'\$LTSCALE\s*\n\s*40\s*\n\s*([\d.]+)', buf.getvalue())
+    check('el DXF fija $LTSCALE', m is not None, 'no aparece en la cabecera')
+    if m:
+        trazo = 1.27 * float(m.group(1))
+        check(f'trazo visible en un panel de 2450mm ({trazo:.0f}mm, no 1.3mm)',
+              trazo > 10, f'{trazo:.1f} mm')
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -376,7 +403,7 @@ if __name__ == '__main__':
                  caso_perfil_cuadrado_avisa, caso_panel_pequeño_cuadrado_sin_avisos,
                  caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
-                 caso_rectangulo_sin_contorno):
+                 caso_rectangulo_sin_contorno, caso_escala_de_linea):
         caso()
         print()
     if FALLOS:
