@@ -27,13 +27,17 @@ import ezdxf
 
 from dxf import _texto, _circulo_taladro, _cota_lineal, UNIT_LABELS
 
+# Colores ACI. Se evita el 2 (amarillo) para el mecanizado: sobre el fondo
+# blanco que usa el taller en el CAD es casi invisible y daba la sensación de
+# que el DXF salía "sin mecanizar". Los elegidos (rojo, azul, magenta) se ven
+# tanto en fondo blanco como en negro; el 7 se adapta solo.
 CAPAS_PANEL = [
     ('CONTORNO', 7, 'CONTINUOUS'),
-    ('TALADROS', 1, 'CONTINUOUS'),
-    ('TALADROS_OCULTOS', 8, 'DASHED'),
-    ('FRESADO', 2, 'CONTINUOUS'),
-    ('FRESADO_OCULTO', 30, 'DASHED'),
-    ('CANALES', 6, 'DASHED'),   # ranuras/cajeados en los CANTOS (no en la cara)
+    ('TALADROS', 1, 'CONTINUOUS'),          # rojo
+    ('TALADROS_OCULTOS', 8, 'DASHED'),      # gris — taladro de la cara opuesta
+    ('FRESADO', 5, 'CONTINUOUS'),           # azul — cajeado en la cara vista
+    ('FRESADO_OCULTO', 30, 'DASHED'),       # naranja — cajeado en la trasera
+    ('CANALES', 6, 'DASHED'),               # magenta — ranuras en los CANTOS
     ('EJES', 4, 'DASHDOT'),
     ('COTAS', 3, 'CONTINUOUS'),
     ('TEXTO', 7, 'CONTINUOUS'),
