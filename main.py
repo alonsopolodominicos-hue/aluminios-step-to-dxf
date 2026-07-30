@@ -158,7 +158,9 @@ async def previsualizar(file: UploadFile = File(...), authorization: Optional[st
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, solido in enumerate(solidos):
+        # start=1: numeración 1-based (pieza_001, pieza_002...) igual que
+        # Yudigar — nunca empieza en 0, así que nunca coincide con "pieza_000".
+        for idx, solido in enumerate(solidos, start=1):
             tmp_stl = None
             try:
                 with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
@@ -196,7 +198,9 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
     piezas_generadas = 0
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, solido in enumerate(solidos):
+        # start=1: numeración 1-based (pieza_001, pieza_002...) igual que
+        # Yudigar, que nunca nombra una pieza "0" ni "pieza_000".
+        for idx, solido in enumerate(solidos, start=1):
             analisis = analizar_solido(solido)
             if not analisis['ok']:
                 omitidas_lines.append(f"{idx}\t{analisis['motivo']}")
@@ -292,7 +296,9 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
 
     piezas = []
     omitidas = []
-    for idx, solido in enumerate(solidos):
+    # start=1: numeración 1-based (pieza_001, pieza_002...) igual que Yudigar,
+    # que nunca nombra una pieza "0" ni "pieza_000".
+    for idx, solido in enumerate(solidos, start=1):
         analisis = analizar_solido_panel(solido)
         if not analisis['ok']:
             omitidas.append({'solido': idx, 'motivo': analisis['motivo']})
@@ -342,7 +348,9 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
     piezas_generadas = 0
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, solido in enumerate(solidos):
+        # start=1: numeración 1-based (pieza_001, pieza_002...) igual que
+        # Yudigar, que nunca nombra una pieza "0" ni "pieza_000".
+        for idx, solido in enumerate(solidos, start=1):
             analisis = analizar_solido_panel(solido)
             if not analisis['ok']:
                 omitidas_lines.append(f"{idx}\t{analisis['motivo']}")
