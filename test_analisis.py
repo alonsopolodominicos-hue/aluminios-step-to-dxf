@@ -244,10 +244,32 @@ def caso_perfil_hueco():
         check('cara frontal (convención positiva)', t['cara'] == 'frontal', f"{t['cara']}")
 
 
+
+# ── Caso 9: el plano de barra no lleva texto ni cotas ───────────────────────
+# El taller no necesita explicaciones en el DXF, solo la geometría de corte.
+def caso_plano_de_barra_sin_texto():
+    print('Caso 9: el plano de barra (dxf.py) no lleva texto ni cotas')
+    from dxf import generar_dxf_pieza
+    r = {
+        'longitud': 400.0, 'ancho': 60.0, 'grosor': 30.0,
+        'angulo_corte_a': 0.0, 'angulo_corte_b': 45.0,
+        'taladros': [
+            {'cara': 'frontal', 'x': 100.0, 'y': 30.0, 'diametro': 8.0, 'profundidad': 12.0, 'pasante': False},
+            {'cara': 'extremo_a', 'x': 20.0, 'y': 15.0, 'diametro': 5.0, 'profundidad': 20.0, 'pasante': True},
+        ],
+    }
+    doc = generar_dxf_pieza('prueba', r)
+    msp = doc.modelspace()
+    check('no genera ninguna entidad TEXT', len(list(msp.query('TEXT'))) == 0)
+    check('no genera ninguna entidad MTEXT', len(list(msp.query('MTEXT'))) == 0)
+    check('no genera ninguna cota (DIMENSION)', len(list(msp.query('DIMENSION'))) == 0)
+    check('sigue dibujando los taladros como círculos', len(list(msp.query('CIRCLE'))) == 2)
+
+
 if __name__ == '__main__':
     for caso in (caso_barra_taladros, caso_axiales_extremos, caso_caras_opuestas,
                  caso_fillets, caso_avellanado, caso_paralelogramo, caso_trapecio,
-                 caso_perfil_hueco):
+                 caso_perfil_hueco, caso_plano_de_barra_sin_texto):
         caso()
         print()
     if FALLOS:

@@ -1,18 +1,13 @@
 """Genera el plano DXF de un PANEL de tablero (madera/melamina) a partir del
 resultado de analisis_panel.analizar_solido_panel() — escala 1:1 y pieza en el
-origen (0,0), como los planos de barra de dxf.py:
+origen (0,0), como los planos de barra de dxf.py. Solo geometría, sin texto:
 
   - Vista principal (la cara ancha, largo × ancho): contorno, taladros de la
     cara frontal (círculo + ejes de centro) y de la trasera (discontinuo), y
     cajeados/ranuras como rectángulos (FRESADO / discontinuo si van por la
     cara trasera).
   - Taladros de canto (lateral_iz/lateral_de/superior/inferior): marca corta
-    perpendicular al borde correspondiente en su posición, con etiqueta — el
-    detalle exacto va en la tabla.
-  - Cotas DXF reales de largo y ancho; el grosor va en el cajetín.
-  - Tabla de mecanizados (taladros y cajeados) con cara, X, Y, medida y
-    profundidad — mismo formato de "hole table" que los planos de barra.
-  - Cajetín con nombre, medidas, avisos y fecha.
+    perpendicular al borde correspondiente en su posición.
 
 Convención de coordenadas del análisis (marco local consistente):
   En caras frontal/trasera: x = a lo largo del LARGO, y = desde el borde
@@ -21,11 +16,9 @@ Convención de coordenadas del análisis (marco local consistente):
   En lateral_iz/lateral_de: x = desde el borde inferior (ANCHO), y = desde la
   cara frontal (GROSOR).
 """
-from datetime import date
-
 import ezdxf
 
-from dxf import _texto, _circulo_taladro, _cota_lineal, UNIT_LABELS
+from dxf import _circulo_taladro
 
 # Colores ACI. Se evita el 2 (amarillo) para el mecanizado: sobre el fondo
 # blanco que usa el taller en el CAD es casi invisible y daba la sensación de
@@ -41,9 +34,6 @@ CAPAS_PANEL = [
     ('GALCES', 30, 'CONTINUOUS'),           # naranja — galce/rebaje de canto abierto a la cara vista
     ('GALCES_OCULTO', 30, 'DASHED'),        # ... y abierto a la cara de atrás
     ('EJES', 4, 'DASHDOT'),
-    ('COTAS', 3, 'CONTINUOUS'),
-    ('TEXTO', 7, 'CONTINUOUS'),
-    ('CAJETIN', 7, 'CONTINUOUS'),
 ]
 
 
@@ -73,13 +63,13 @@ def _rect(msp, x0, y0, x1, y1, capa):
 
 def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     """analisis = dict de analizar_solido_panel() con ok=True.
-    Devuelve un ezdxf.Document con el plano completo del panel."""
+    Devuelve un ezdxf.Document con el plano completo del panel (solo
+    geometría: sin textos, cotas, tabla de mecanizados ni cajetín)."""
+    del nombre_capa  # ya no se usa: era solo para el cajetín, que se ha quitado.
     L = analisis['largo']
     A = analisis['ancho']
-    G = analisis['grosor']
     taladros = analisis.get('taladros', [])
     cajeados = analisis.get('cajeados', [])
-    avisos = analisis.get('advertencias', [])
 
     doc = ezdxf.new(dxfversion='R2010', setup=True)
     doc.header['$INSUNITS'] = insunits
@@ -88,9 +78,8 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
         doc.layers.add(name=nombre, color=color, linetype=tipo)
     msp = doc.modelspace()
 
-    # Módulo de tamaño para textos/separaciones, proporcional a la pieza.
+    # Módulo de tamaño para separaciones, proporcional a la pieza.
     t = max(min(L, A) * 0.03, 6.0)
-    sep = 8 * t
 
     # Escala de los tipos de línea, PROPORCIONAL A LA PIEZA. El patrón DASHED
     # mide 1,27 mm: con la escala por defecto (1.0) sobre un panel de 2450 mm
@@ -111,44 +100,24 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     else:
         _rect(msp, 0, 0, L, A, 'CONTORNO')
 
-    filas_tabla = []
-    n_tag = 0
-
     # ── Taladros ────────────────────────────────────────────────────────────
     for tal in taladros:
-        n_tag += 1
-        tag = f'T{n_tag}'
         cara = tal.get('cara')
         x, y = tal.get('x'), tal.get('y')
         d = tal['diametro']
-        pos_etiqueta = None
 
         if cara in ('frontal', 'trasera') and x is not None:
             _circulo_taladro(msp, x, y, d, oculto=(cara == 'trasera'))
-            pos_etiqueta = (x + d / 2 + t * 0.3, y + d / 2 + t * 0.3)
         elif cara in ('superior', 'inferior') and x is not None:
             # Canto largo: marca corta perpendicular al borde en su x.
             borde_y = A if cara == 'superior' else 0
             signo = 1 if cara == 'superior' else -1
             msp.add_line((x, borde_y), (x, borde_y + signo * t * 1.2), dxfattribs={'layer': 'TALADROS'})
-            pos_etiqueta = (x + t * 0.3, borde_y + signo * t * 1.4)
         elif cara in ('lateral_iz', 'lateral_de') and x is not None:
             # Canto corto: la x local del análisis recorre el ANCHO del panel.
             borde_x = 0 if cara == 'lateral_iz' else L
             signo = -1 if cara == 'lateral_iz' else 1
             msp.add_line((borde_x, x), (borde_x + signo * t * 1.2, x), dxfattribs={'layer': 'TALADROS'})
-            pos_etiqueta = (borde_x + signo * t * 1.4, x + t * 0.3)
-
-        if pos_etiqueta:
-            _texto(msp, tag, pos_etiqueta, t * 0.7, capa='TALADROS')
-
-        prof = 'PASANTE' if tal.get('pasante') else f"prof. {tal.get('profundidad', '?')}"
-        extra = ''
-        if tal.get('avellanado'):
-            av = tal['avellanado']
-            extra = f" + caja Ø{av['diametro']}x{av['profundidad']}"
-        filas_tabla.append((tag, cara or 'sin cara', x if x is not None else '—',
-                            y if y is not None else '—', f'Ø{d}', prof + extra))
 
     # ── Cajeados / ranuras ──────────────────────────────────────────────────
     # En CARA (frontal/trasera): rectángulo a cota, en su posición real.
@@ -157,26 +126,18 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     # planta se ve como la banda de material que el disco se ha llevado: se
     # dibuja abierta al borde (solo los dos topes y la línea de fondo), en
     # trazo discontinuo porque queda enterrada dentro del grosor. Así se puede
-    # medir en el CAD. Lo único que la planta no puede mostrar es a qué altura
-    # del grosor está — esa cota va en la tabla.
+    # medir en el CAD.
     # Línea de corte contra la que se apoyan las canales: el contorno real si
     # la pieza tiene forma, y si no la propia caja envolvente.
     contorno_ref = ([(pt[0], pt[1]) for pt in contorno] if contorno
                     else [(0.0, 0.0), (L, 0.0), (L, A), (0.0, A)])
-    n_canales = 0
-    n_galces = 0
     for caj in cajeados:
-        n_tag += 1
-        tag = f'T{n_tag}'
         x0, y0 = caj['x'], caj['y']
         cara = caj['cara']
-        etiqueta_medida = f"{caj['forma']} {caj['largo']:.0f}x{caj['ancho']:.0f}"
 
         if not caj.get('en_canto'):
             capa = 'FRESADO_OCULTO' if cara == 'trasera' else 'FRESADO'
             _rect(msp, x0, y0, x0 + caj['largo'], y0 + caj['ancho'], capa)
-            _texto(msp, tag, (x0 + caj['largo'] + t * 0.3, y0), t * 0.7, capa=capa)
-            filas_tabla.append((tag, cara, x0, y0, etiqueta_medida, f"prof. {caj['profundidad']}"))
             continue
 
         # Traza REAL del fondo, tal cual sale de la geometría del sólido: sirve
@@ -185,17 +146,8 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
         pts = [tuple(q) for q in caj.get('puntos', [])]
         if len(pts) < 2:
             continue
-        p = caj['profundidad']
-        if caj['forma'] == 'ranura':
-            n_canales += 1
-            capa = 'CANALES'
-            etiqueta_medida = f"canal {caj['largo']:.0f} largo"
-            detalle = f"{caj['ancho']} de ancho, entra {p} — a {y0} de la cara trasera"
-        else:
-            n_galces += 1
-            capa = 'GALCES_OCULTO' if caj.get('abierto_a') == 'trasera' else 'GALCES'
-            etiqueta_medida = f"galce {caj['largo']:.0f} largo"
-            detalle = f"{p} de ancho x {caj['ancho']} de hondo, desde la cara {caj.get('abierto_a')}"
+        capa = ('CANALES' if caj['forma'] == 'ranura'
+                else 'GALCES_OCULTO' if caj.get('abierto_a') == 'trasera' else 'GALCES')
         # Polilínea ABIERTA y dos conectores hasta la línea de corte: el lado
         # que da al canto no se cierra — ahí no hay material, es la boca. Los
         # conectores van al punto MÁS CERCANO del contorno, no en la dirección
@@ -203,48 +155,5 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
         msp.add_lwpolyline(pts, close=False, dxfattribs={'layer': capa})
         for extremo in (pts[0], pts[-1]):
             msp.add_line(extremo, _mas_cercano(extremo, contorno_ref), dxfattribs={'layer': capa})
-        medio = pts[len(pts) // 2]
-        _texto(msp, tag, (medio[0] + t * 0.3, medio[1] + t * 0.3), t * 0.7, capa=capa)
-        filas_tabla.append((tag, f'{cara} (CANTO)', round(medio[0], 1), round(medio[1], 1),
-                            etiqueta_medida, detalle))
-
-    # ── Cotas generales ─────────────────────────────────────────────────────
-    _cota_lineal(msp, (0, 0), (L, 0), (L / 2, -sep * 0.35), t)
-    _cota_lineal(msp, (0, 0), (0, A), (-sep * 0.35, A / 2), t, angulo=90)
-
-    # ── Tabla de mecanizados ────────────────────────────────────────────────
-    y_tabla = -sep * 0.6
-    if filas_tabla:
-        _texto(msp, 'TABLA DE MECANIZADOS', (0, y_tabla), t * 0.85)
-        cab = f"{'TAG':<5}{'CARA':<12}{'X':>9}{'Y':>9}  {'MEDIDA':<18}{'PROFUNDIDAD'}"
-        _texto(msp, cab, (0, y_tabla - t * 1.4), t * 0.7)
-        for j, (tag, cara, x, y, medida, prof) in enumerate(filas_tabla):
-            fila = f"{tag:<5}{cara:<12}{str(x):>9}{str(y):>9}  {medida:<18}{prof}"
-            _texto(msp, fila, (0, y_tabla - t * 1.4 * (j + 2)), t * 0.7)
-        y_fin_tabla = y_tabla - t * 1.4 * (len(filas_tabla) + 2)
-    else:
-        y_fin_tabla = y_tabla
-
-    for aviso in avisos:
-        _texto(msp, f'⚠ {aviso}', (0, y_fin_tabla - t * 1.4), t * 0.6)
-        y_fin_tabla -= t * 1.4
-
-    # ── Cajetín ─────────────────────────────────────────────────────────────
-    alto_caj = t * 5.6
-    ancho_caj = max(L * 0.55, t * 40)
-    y0 = y_fin_tabla - t * 1.5 - alto_caj
-    _rect(msp, 0, y0, ancho_caj, y0 + alto_caj, 'CAJETIN')
-    msp.add_line((0, y0 + alto_caj - t * 1.8), (ancho_caj, y0 + alto_caj - t * 1.8),
-                 dxfattribs={'layer': 'CAJETIN'})
-    _texto(msp, nombre_capa, (t * 0.5, y0 + alto_caj - t * 1.4), t, capa='CAJETIN')
-    unidad = UNIT_LABELS.get(insunits, 'mm')
-    forma_txt = ' (envolvente — contorno real dibujado)' if contorno else ''
-    _texto(msp, f'Panel {L:.1f} x {A:.1f} x {G:.1f} {unidad}{forma_txt}', (t * 0.5, y0 + alto_caj - t * 3.2),
-           t * 0.75, capa='CAJETIN')
-    _texto(msp, f'Taladros: {len(taladros)}   '
-                f'Cajeados en cara: {len(cajeados) - n_canales - n_galces}   '
-                f'Canales en canto: {n_canales}   Galces de canto: {n_galces}   '
-                f'Aluminios Cariñena   {date.today().strftime("%d/%m/%Y")}',
-           (t * 0.5, y0 + t * 0.7), t * 0.75, capa='CAJETIN')
 
     return doc

@@ -485,6 +485,33 @@ def caso_canal_en_panel_con_forma():
           str([c['cara'] for c in canales]))
 
 
+
+# ── Caso 20: el plano de panel no lleva texto ni cotas ──────────────────────
+# El taller no necesita explicaciones en el DXF, solo la geometría de corte.
+def caso_plano_de_panel_sin_texto():
+    print('Caso 20: el plano de panel (dxf_panel.py) no lleva texto ni cotas')
+    from dxf_panel import generar_dxf_panel
+    r = {
+        'ok': True, 'largo': 800.0, 'ancho': 400.0, 'grosor': 19.0,
+        'taladros': [
+            {'cara': 'frontal', 'x': 100.0, 'y': 100.0, 'diametro': 35.0, 'profundidad': 13.0, 'pasante': False},
+        ],
+        'cajeados': [
+            {'cara': 'frontal', 'x': 50.0, 'y': 50.0, 'largo': 120.0, 'ancho': 60.0,
+             'profundidad': 12.0, 'forma': 'cajeado', 'en_canto': False},
+        ],
+        'advertencias': [],
+    }
+    doc = generar_dxf_panel('prueba', r)
+    msp = doc.modelspace()
+    check('no genera ninguna entidad TEXT', len(list(msp.query('TEXT'))) == 0)
+    check('no genera ninguna entidad MTEXT', len(list(msp.query('MTEXT'))) == 0)
+    check('no genera ninguna cota (DIMENSION)', len(list(msp.query('DIMENSION'))) == 0)
+    check('sigue dibujando el taladro como círculo', len(list(msp.query('CIRCLE'))) == 1)
+    check('sigue dibujando el cajeado como rectángulo (LWPOLYLINE)',
+          len(list(msp.query('LWPOLYLINE[layer=="FRESADO"]'))) == 1)
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -494,7 +521,8 @@ if __name__ == '__main__':
                  caso_liston_real_avisa, caso_panel_estrecho_real_sin_avisos,
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
                  caso_rectangulo_sin_contorno, caso_escala_de_linea,
-                 caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma):
+                 caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma,
+                 caso_plano_de_panel_sin_texto):
         caso()
         print()
     if FALLOS:
