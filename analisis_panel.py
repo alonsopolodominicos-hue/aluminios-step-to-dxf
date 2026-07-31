@@ -92,6 +92,13 @@ TOL_NORMAL_CANTO = 1e-3      # |n·Z| — por debajo, la cara es de canto (verti
 COS_MISMO_CANTO = 0.999      # coseno entre normales para considerarlas el mismo canto
 SOLAPE_MIN_CANTO = 1.0       # mm que deben solaparse dos caras para ser el mismo canto
 PROFUNDIDAD_MIN_CANAL = 0.5  # mm — por debajo es ruido de geometría
+# Un mecanizado de canto real trabaja cerca del borde (galces de 16.5, canales
+# de ~17 en las piezas del taller). Una cara vertical retranqueada MÁS que esto
+# no es mecanizado de canto: es la pared de un cajeado/rebaje interior que el
+# sondeo de material no llegó a descartar (p. ej. un rebaje abierto a la vez a
+# un canto y a una cara ancha) — sin este tope colaba entradas con
+# "profundidad 150" en un rebaje de 5 mm.
+PROFUNDIDAD_MAX_CANAL = 60.0  # mm
 TOL_TOCA_CARA = 0.05         # mm — margen para decidir si llega a una cara ancha
 MUESTRAS_RAYO = 8            # puntos de sondeo entre la cara y el contorno
 
@@ -208,6 +215,8 @@ def _detectar_canales_perimetro(solid, env, contorno):
         profundidad = dists[len(dists) // 2]
         if profundidad < PROFUNDIDAD_MIN_CANAL:
             continue  # llega al contorno: es canto liso, no mecanizado
+        if profundidad > PROFUNDIDAD_MAX_CANAL:
+            continue  # demasiado adentro: pared de cajeado interior, no canto
 
         # ¿Hay MATERIAL entre esta cara y la línea de corte? Si lo hay, no es un
         # mecanizado de canto: es la PARED de un bolsillo interior, que también
@@ -250,9 +259,15 @@ def _detectar_canales_perimetro(solid, env, contorno):
         abierto = ('trasera' if z0 <= TOL_TOCA_CARA
                    else 'frontal' if z1 >= grosor - TOL_TOCA_CARA else None)
         nx, ny = _dot(n, X), _dot(n, Y)
-        # La traza recorre la curva de ida y de vuelta: su longitud es el doble.
-        largo = sum(math.hypot(puntos[i + 1][0] - puntos[i][0], puntos[i + 1][1] - puntos[i][1])
-                    for i in range(len(puntos) - 1)) / 2.0
+        # Si la traza vuelve al punto de partida es que recorre la curva de ida
+        # y de vuelta (cara curva discretizada): su longitud es el doble. Si
+        # queda ABIERTA (un galce recto proyecta en planta un único segmento),
+        # la longitud es la real y dividirla daba la mitad del galce (316.5 en
+        # un galce real de 633).
+        recorrido = sum(math.hypot(puntos[i + 1][0] - puntos[i][0], puntos[i + 1][1] - puntos[i][1])
+                        for i in range(len(puntos) - 1))
+        cerrada = math.hypot(puntos[-1][0] - puntos[0][0], puntos[-1][1] - puntos[0][1]) < 1.0
+        largo = recorrido / 2.0 if cerrada else recorrido
 
         resultado.append({
             'cara': _canto_mas_parecido(nx, ny),
@@ -702,6 +717,34 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     }
 
 
+def _cara_ancha_exterior_rectangular(faces_planas, grupos, env, nombre):
+    """¿El wire exterior de la cara ancha `nombre` ('frontal'/'trasera') es un
+    rectángulo? Devuelve True/False, o None si no se puede determinar (grupo
+    ausente, sin cara en el plano exterior o wire no discretizable) — en ese
+    caso el llamador conserva el comportamiento de siempre.
+
+    La envolvente acepta formas que no son rectángulos — paralelogramos
+    (ambos cortes inclinados paralelos) o esquinas redondeadas (el eje sale
+    ligeramente girado y largo/ancho dan MAL: 616×422 medidos para una pieza
+    real de 600×400). La comprobación es directa sobre el wire exterior:
+    4 vértices tras simplificar colineales y esquinas a 90°."""
+    g = next((k for k, n in env['nombres'].items() if n == nombre), None)
+    if g is None:
+        return None
+    normal = grupos[g]['normal']
+    plano = env['planos'][g]
+    exteriores = [faces_planas[i] for i in grupos[g]['indices']
+                  if abs(_dot(Vector(*faces_planas[i].Center().toTuple()), normal) - plano) < 0.5]
+    if not exteriores:
+        return None
+    cara_ext = max(exteriores, key=lambda f: f.Area())
+    pts3d = _discretizar_wire(cara_ext.outerWire())
+    if pts3d is None:
+        return None
+    pts2d = [(_dot(p, env['eje']), _dot(p, env['Y'])) for p in pts3d]
+    return _es_contorno_rectangular(pts2d)
+
+
 def analizar_solido_panel(solid):
     """Analiza un sólido como panel de tablero. Devuelve:
       {'ok': True, 'largo', 'ancho', 'grosor', 'seccion_regular',
@@ -736,24 +779,21 @@ def analizar_solido_panel(solid):
     # tras simplificar colineales y esquinas a 90°. Si no lo es, mejor el
     # contorno real; si la ruta de forma tampoco puede, se continúa con la
     # envolvente y sus avisos (comportamiento anterior).
-    g_frontal = next((k for k, n in env['nombres'].items() if n == 'frontal'), None)
-    es_rectangular = True
-    if g_frontal is not None:
-        normal_f = grupos[g_frontal]['normal']
-        plano_f = env['planos'][g_frontal]
-        exteriores = [faces_planas[i] for i in grupos[g_frontal]['indices']
-                      if abs(_dot(Vector(*faces_planas[i].Center().toTuple()), normal_f) - plano_f) < 0.5]
-        if exteriores:
-            cara_ext = max(exteriores, key=lambda f: f.Area())
-            pts3d = _discretizar_wire(cara_ext.outerWire())
-            if pts3d is not None:
-                ejes_2d = (env['eje'], env['Y'])
-                pts2d = [(_dot(p, ejes_2d[0]), _dot(p, ejes_2d[1])) for p in pts3d]
-                es_rectangular = _es_contorno_rectangular(pts2d)
-    if not es_rectangular:
-        forma = _analizar_panel_forma(solid, faces_planas, grupos)
-        if forma is not None:
-            return forma
+    frontal_rect = _cara_ancha_exterior_rectangular(faces_planas, grupos, env, 'frontal')
+    if frontal_rect is False:
+        # La cara frontal tiene entrantes. Eso NO basta para tratar el panel
+        # como "con forma": un galce abierto a esa cara deja exactamente la
+        # misma huella en su wire exterior, y tratarlo como forma se lo comía
+        # (el contorno seguía el escalón y el galce desaparecía del DXF y del
+        # BPP — pieza real 1232.5×900×26.6 con galce de 633). Una forma DE
+        # VERDAD atraviesa todo el grosor, así que deja huella en LAS DOS
+        # caras anchas: solo si la trasera tampoco es un rectángulo se toma la
+        # ruta de forma. Si la trasera sí lo es, el panel es rectangular y los
+        # entrantes de la frontal los recoge la detección de mecanizados.
+        if _cara_ancha_exterior_rectangular(faces_planas, grupos, env, 'trasera') is not True:
+            forma = _analizar_panel_forma(solid, faces_planas, grupos)
+            if forma is not None:
+                return forma
 
     caras_cil = _caras_cilindricas(solid)
     cilindros = _fusionar_avellanados(_agrupar_cilindros(caras_cil))

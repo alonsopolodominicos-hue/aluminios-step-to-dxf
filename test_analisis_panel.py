@@ -512,6 +512,46 @@ def caso_plano_de_panel_sin_texto():
           len(list(msp.query('LWPOLYLINE[layer=="FRESADO"]'))) == 1)
 
 
+# ── Galce de canto abierto a una cara ancha (pieza real 1232.5×900×26.6) ────
+# El galce deja huella en el wire exterior de la cara ancha a la que abre. Si
+# esa cara es justo la que decide forma-vs-rectangular, el panel se trataba
+# como "con forma", el contorno seguía el escalón del galce y el galce
+# desaparecía del análisis (0 cajeados), del DXF y del BPP. Una forma real
+# atraviesa el grosor y marca las DOS caras anchas; el galce, solo una.
+def _panel_con_galce(abierto_a_z_alta):
+    L, A, G = 1232.5, 900.0, 26.6
+    panel = cq.Workplane('XY').box(L, A, G, centered=(False, False, False))
+    z0 = (G - 18.5) if abierto_a_z_alta else -0.5
+    galce = (cq.Workplane('XY')
+             .transformed(offset=(300, -0.5, z0))
+             .box(633, 16.5 + 0.5, 18.5 + 0.5, centered=(False, False, False)))
+    return panel.cut(galce)
+
+
+def caso_galce_abierto_a_cada_cara():
+    print('Caso: galce de canto 633×16.5×18.5 — se detecta abra a la cara que abra')
+    for lado, alta in (('cara z alta', True), ('cara z baja', False)):
+        r = analizar(_panel_con_galce(alta))
+        check(f'[{lado}] ok', r['ok'], r.get('motivo', ''))
+        if not r['ok']:
+            continue
+        # El panel es rectangular: el galce NO debe convertirse en "forma".
+        check(f'[{lado}] sin contorno de forma', r.get('contorno') is None,
+              f"contorno de {len(r.get('contorno') or [])} puntos")
+        check(f'[{lado}] sin advertencias', len(r['advertencias']) == 0, f"{r['advertencias']}")
+        galces = [c for c in r['cajeados'] if c.get('en_canto') and c['cara'] == 'inferior']
+        check(f'[{lado}] galce detectado en el canto inferior', len(galces) == 1, f"{r['cajeados']}")
+        if galces:
+            g = galces[0]
+            # La traza recta proyecta un único segmento (abierta): el largo es
+            # el real, no la mitad como cuando la traza va y vuelve.
+            check(f'[{lado}] largo 633', aprox(g['largo'], 633, 1.0), f"{g['largo']}")
+            check(f'[{lado}] ancho 18.5', aprox(g['ancho'], 18.5, 0.6), f"{g['ancho']}")
+            check(f'[{lado}] profundidad 16.5', aprox(g['profundidad'], 16.5, 0.6), f"{g['profundidad']}")
+            check(f'[{lado}] abierto a una cara ancha', g['abierto_a'] in ('frontal', 'trasera'),
+                  f"{g['abierto_a']}")
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -522,7 +562,7 @@ if __name__ == '__main__':
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
                  caso_rectangulo_sin_contorno, caso_escala_de_linea,
                  caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma,
-                 caso_plano_de_panel_sin_texto):
+                 caso_plano_de_panel_sin_texto, caso_galce_abierto_a_cada_cara):
         caso()
         print()
     if FALLOS:
