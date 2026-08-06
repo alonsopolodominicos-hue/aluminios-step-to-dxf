@@ -61,6 +61,28 @@ def caso_panel_simple():
     check('sin advertencias', len(r['advertencias']) == 0, f"{r['advertencias']}")
 
 
+# ── Caso: inglete a 45° — sierra vs. forma fresable ─────────────────────────
+def caso_inglete_grosor():
+    print('Caso: inglete 45° — se distingue el de sierra del fresable')
+    from analisis_panel import _advertencias_panel
+    # Los dos casos llegan con el MISMO ángulo: lo único que los separa es
+    # dónde está inclinado el corte. Antes salían con el mismo aviso y no
+    # había forma de saber si al .bpp le faltaba trabajo o estaba bien vacío.
+    sierra = _advertencias_panel(592, 60, 15, 45.0, 45.0, 'grosor', 'grosor')
+    check('el inglete a través del grosor manda a la sierra',
+          any('sierra' in a for a in sierra), f'{sierra}')
+    check('y no se le llama "borde no rectangular"',
+          not any('Borde no rectangular' in a for a in sierra), f'{sierra}')
+
+    planta = _advertencias_panel(592, 60, 15, 45.0, 45.0, 'planta', 'planta')
+    check('una forma en PLANTA sigue avisando de que hay que revisarla',
+          any('Borde no rectangular' in a for a in planta), f'{planta}')
+    check('y esa no dice sierra', not any('sierra' in a for a in planta), f'{planta}')
+
+    recto = _advertencias_panel(592, 60, 15, 0.0, 0.0, 'recto', 'recto')
+    check('un corte recto no avisa de nada', recto == [], f'{recto}')
+
+
 # ── Caso 2: dos cazoletas de bisagra Ø35 prof. 13 ────────────────────────────
 def caso_bisagras():
     print('Caso 2: panel con 2 cazoletas de bisagra Ø35 prof. 13')
@@ -553,7 +575,7 @@ def caso_galce_abierto_a_cada_cara():
 
 
 if __name__ == '__main__':
-    for caso in (caso_panel_simple, caso_bisagras, caso_sistema32, caso_taladro_canto,
+    for caso in (caso_panel_simple, caso_inglete_grosor, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
                  caso_ranura_abierta_a_canto, caso_casi_cuadrado_sin_avisos,
                  caso_encimera_gruesa_sin_avisos, caso_liston_estrecho_sin_avisos,

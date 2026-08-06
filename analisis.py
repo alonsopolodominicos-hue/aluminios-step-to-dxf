@@ -199,6 +199,21 @@ def _analizar_envolvente(solid, faces_planas, grupos):
         d = max(-1.0, min(1.0, abs(_dot(grupos[g]['normal'], eje))))
         return math.degrees(math.acos(d))
 
+    def plano_corte(g):
+        """Dónde está inclinado el corte del testero: en PLANTA (la cara ancha
+        deja de ser un rectángulo, y eso sí se puede dibujar y fresar) o a
+        través del GROSOR (un bisel/inglete de sierra, que un router de 3 ejes
+        no hace).
+
+        Sin esto, los dos casos salían con el mismo aviso y no había forma de
+        saber si faltaba trabajo por hacer o si la pieza estaba bien vacía."""
+        n = grupos[g]['normal']
+        cy = abs(_dot(n, Y))   # inclinación dentro del plano de la cara ancha
+        cz = abs(_dot(n, Z))   # inclinación a través del grosor
+        if cy < 1e-3 and cz < 1e-3:
+            return 'recto'
+        return 'planta' if cy >= cz else 'grosor'
+
     # Laterales: el resto de grupos. La sección sale de sus pares.
     laterales = [k for k in range(len(grupos)) if k not in (g_ext_a, g_ext_b)]
     pares_laterales = [p for p in pares if p != elegido['grupos'] and p != (gj_ext, gi_ext)]
@@ -257,6 +272,8 @@ def _analizar_envolvente(solid, faces_planas, grupos):
         'longitud': longitud,
         'angulo_corte_a': angulo_corte(g_ext_a),
         'angulo_corte_b': angulo_corte(g_ext_b),
+        'plano_corte_a': plano_corte(g_ext_a),
+        'plano_corte_b': plano_corte(g_ext_b),
         'seccion': seccion,
         'seccion_regular': seccion_regular,
         'grupos_extremo': (g_ext_a, g_ext_b),

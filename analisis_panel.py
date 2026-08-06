@@ -460,7 +460,8 @@ UMBRAL_PANEL_GROSOR_ANCHO = 0.3
 UMBRAL_ANGULO_RECTO = 1.0  # grados — por debajo es ruido numérico de un corte recto
 
 
-def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0):
+def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0,
+                        plano_a='recto', plano_b='recto'):
     avisos = []
     if largo <= 0 or ancho <= 0:
         return avisos
@@ -470,6 +471,18 @@ def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0):
             '(¿es en realidad una barra/listón de sección maciza, no un panel de tablero?)'
         )
     if angulo_a > UMBRAL_ANGULO_RECTO or angulo_b > UMBRAL_ANGULO_RECTO:
+        # Un inglete A TRAVÉS DEL GROSOR no es trabajo que se le haya perdido
+        # al CNC: un router de 3 ejes no lo hace, va a la sierra. Decirlo, en
+        # vez de soltar el mismo aviso que para una forma en planta, que sí
+        # es fresable y sí tendría que estar en el DXF.
+        planos = {plano_a, plano_b} - {'recto'}
+        if planos == {'grosor'}:
+            avisos.append(
+                f'Inglete de {max(angulo_a, angulo_b):.0f}° a través del GROSOR en los cantos cortos. '
+                'Va a la sierra, no al CNC: el .bpp de esta pieza sale sin ese corte a propósito. '
+                'Largo/ancho son la caja envolvente.'
+            )
+            return avisos
         avisos.append(
             f'Borde no rectangular detectado (ángulos {angulo_a:.1f}°/{angulo_b:.1f}° en los cantos cortos) — '
             f'largo/ancho son la caja envolvente, NO la forma real de la pieza; revisar y ajustar a mano antes de cortar.'
@@ -699,7 +712,11 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     cajeados = (_detectar_cajeados(faces_planas, grupos, env_cajeados, contorno)
                 + _detectar_canales_perimetro(solid, env_sub, contorno))
 
-    avisos = _advertencias_panel(largo, ancho, grosor) + [
+    ang_a = env_sub.get('angulo_corte_a', 0.0)
+    ang_b = env_sub.get('angulo_corte_b', 0.0)
+    pl_a = env_sub.get('plano_corte_a', 'recto')
+    pl_b = env_sub.get('plano_corte_b', 'recto')
+    avisos = _advertencias_panel(largo, ancho, grosor, ang_a, ang_b, pl_a, pl_b) + [
         f'Panel con contorno NO rectangular ({len(contorno)} puntos) — el DXF lleva la forma real; '
         f'largo/ancho ({largo:.0f}x{ancho:.0f}) y el BPP son el panel envolvente.'
     ]
@@ -713,6 +730,10 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
         'taladros': taladros,
         'taladros_descartados': len(cilindros) - len(validos),
         'cajeados': cajeados,
+        'angulo_corte_a': round(ang_a, 2),
+        'angulo_corte_b': round(ang_b, 2),
+        'plano_corte_a': pl_a,
+        'plano_corte_b': pl_b,
         'advertencias': avisos,
     }
 
@@ -828,5 +849,11 @@ def analizar_solido_panel(solid):
         'taladros': taladros,
         'taladros_descartados': descartados,
         'cajeados': cajeados,
-        'advertencias': _advertencias_panel(largo, ancho, grosor, env['angulo_corte_a'], env['angulo_corte_b']),
+        'angulo_corte_a': round(env['angulo_corte_a'], 2),
+        'angulo_corte_b': round(env['angulo_corte_b'], 2),
+        'plano_corte_a': env.get('plano_corte_a', 'recto'),
+        'plano_corte_b': env.get('plano_corte_b', 'recto'),
+        'advertencias': _advertencias_panel(
+            largo, ancho, grosor, env['angulo_corte_a'], env['angulo_corte_b'],
+            env.get('plano_corte_a', 'recto'), env.get('plano_corte_b', 'recto')),
     }
