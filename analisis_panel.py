@@ -461,7 +461,8 @@ UMBRAL_ANGULO_RECTO = 1.0  # grados — por debajo es ruido numérico de un cort
 
 
 def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0,
-                        plano_a='recto', plano_b='recto'):
+                        plano_a='recto', plano_b='recto', seccion_regular=True,
+                        sin_mecanizados=False):
     avisos = []
     if largo <= 0 or ancho <= 0:
         return avisos
@@ -469,6 +470,16 @@ def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0,
         avisos.append(
             f'Grosor {grosor:.1f}mm parece grande para un panel de {ancho:.1f}mm de ancho '
             '(¿es en realidad una barra/listón de sección maciza, no un panel de tablero?)'
+        )
+    # Sección NO regular y, aun así, ni contorno ni un solo mecanizado: la
+    # pieza tiene algo que el análisis ha visto pero no ha sabido nombrar, y
+    # antes salía con la lista de avisos VACÍA. En el taller eso se lee como
+    # "esta pieza no lleva nada", que es exactamente lo que no se sabe.
+    if not seccion_regular and sin_mecanizados:
+        avisos.append(
+            'La sección de esta pieza no es constante, pero no se ha reconocido ningún '
+            'mecanizado ni una forma que dibujar. El .bpp sale como panel liso: '
+            'COMPRUÉBALA contra el 3D antes de cortar.'
         )
     if angulo_a > UMBRAL_ANGULO_RECTO or angulo_b > UMBRAL_ANGULO_RECTO:
         # Un inglete A TRAVÉS DEL GROSOR no es trabajo que se le haya perdido
@@ -855,5 +866,6 @@ def analizar_solido_panel(solid):
         'plano_corte_b': env.get('plano_corte_b', 'recto'),
         'advertencias': _advertencias_panel(
             largo, ancho, grosor, env['angulo_corte_a'], env['angulo_corte_b'],
-            env.get('plano_corte_a', 'recto'), env.get('plano_corte_b', 'recto')),
+            env.get('plano_corte_a', 'recto'), env.get('plano_corte_b', 'recto'),
+            env['seccion_regular'], not taladros and not cajeados),
     }

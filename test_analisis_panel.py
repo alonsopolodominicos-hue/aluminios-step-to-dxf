@@ -82,6 +82,18 @@ def caso_inglete_grosor():
     recto = _advertencias_panel(592, 60, 15, 0.0, 0.0, 'recto', 'recto')
     check('un corte recto no avisa de nada', recto == [], f'{recto}')
 
+    # Las 5 piezas que salían vacías Y MUDAS del trabajo del 06-08: sección no
+    # constante, sin contorno y sin un solo mecanizado. El silencio se lee en
+    # el taller como "no lleva nada", que es justo lo que no se sabe.
+    muda = _advertencias_panel(100, 70, 19, 0.0, 0.0, 'recto', 'recto',
+                               seccion_regular=False, sin_mecanizados=True)
+    check('una pieza vacía con sección irregular YA NO sale muda',
+          any('COMPRUÉBALA' in a for a in muda), f'{muda}')
+    conmec = _advertencias_panel(100, 70, 19, 0.0, 0.0, 'recto', 'recto',
+                                 seccion_regular=False, sin_mecanizados=False)
+    check('si sí trae mecanizados, no molesta con ese aviso',
+          not any('COMPRUÉBALA' in a for a in conmec), f'{conmec}')
+
 
 # ── Caso 2: dos cazoletas de bisagra Ø35 prof. 13 ────────────────────────────
 def caso_bisagras():
