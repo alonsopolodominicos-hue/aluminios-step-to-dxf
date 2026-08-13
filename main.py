@@ -45,7 +45,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13d'
+VERSION_ANALISIS = '2026-08-13e'
 
 app = FastAPI()
 
@@ -215,6 +215,7 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
 
     nombre_original, resultado, componentes = await _cargar_step(file)
 
+    t_inicio = time.monotonic()
     solidos = resultado.solids().vals()
     if not solidos:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
@@ -285,8 +286,12 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                 tmp_stl = tmp.name
             exporters.export(resultado.val(), tmp_stl, exportType='STL')
-            with open(tmp_stl, 'rb') as f:
-                zf.writestr('conjunto_completo.stl', f.read())
+            # zf.write() lee el fichero por trozos; writestr(f.read()) metía
+            # el STL ENTERO en memoria (y otra copia comprimida). En un
+            # conjunto grande son decenas de MB de más en un servicio con
+            # 512 MB — una de las formas de quedarse sin memoria a mitad de
+            # conversión y que el navegador acabe con "no respondió a tiempo".
+            zf.write(tmp_stl, 'conjunto_completo.stl')
         except Exception as e:
             print(f'[convertir] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
         finally:
@@ -303,7 +308,11 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
             'Content-Disposition': f'attachment; filename="{nombre_zip}"',
             'X-Piezas-Count': str(piezas_generadas),
             'X-Piezas-Omitidas': str(len(omitidas_lines) - 1),
-            'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, Content-Disposition',
+            # Cuánto ha tardado el SERVICIO. Si el navegador dice que no
+            # respondió a tiempo y aquí pone 15 s, el tiempo se fue en la
+            # subida o en la red, no en convertir.
+            'X-Tiempo-Ms': str(int((time.monotonic() - t_inicio) * 1000)),
+            'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, X-Tiempo-Ms, Content-Disposition',
         },
     )
 
@@ -422,6 +431,7 @@ def _convertir_panel_sync(nombre_original, resultado, componentes):
     cuando en realidad estaba trabajando) y dos conversiones a la vez se
     ponían en cola sin que nadie lo supiera — la segunda se comía el tiempo
     de espera del navegador y salía "El servicio no respondió a tiempo"."""
+    t_inicio = time.monotonic()
     entradas = _entradas_a_convertir(resultado, componentes)
     if not entradas:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
@@ -517,8 +527,12 @@ def _convertir_panel_sync(nombre_original, resultado, componentes):
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                 tmp_stl = tmp.name
             exporters.export(resultado.val(), tmp_stl, exportType='STL')
-            with open(tmp_stl, 'rb') as f:
-                zf.writestr('conjunto_completo.stl', f.read())
+            # zf.write() lee el fichero por trozos; writestr(f.read()) metía
+            # el STL ENTERO en memoria (y otra copia comprimida). En un
+            # conjunto grande son decenas de MB de más en un servicio con
+            # 512 MB — una de las formas de quedarse sin memoria a mitad de
+            # conversión y que el navegador acabe con "no respondió a tiempo".
+            zf.write(tmp_stl, 'conjunto_completo.stl')
         except Exception as e:
             print(f'[convertir-panel] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
         finally:
@@ -535,6 +549,10 @@ def _convertir_panel_sync(nombre_original, resultado, componentes):
             'Content-Disposition': f'attachment; filename="{nombre_zip}"',
             'X-Piezas-Count': str(piezas_generadas),
             'X-Piezas-Omitidas': str(len(omitidas_lines) - 1),
-            'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, Content-Disposition',
+            # Cuánto ha tardado el SERVICIO. Si el navegador dice que no
+            # respondió a tiempo y aquí pone 15 s, el tiempo se fue en la
+            # subida o en la red, no en convertir.
+            'X-Tiempo-Ms': str(int((time.monotonic() - t_inicio) * 1000)),
+            'Access-Control-Expose-Headers': 'X-Piezas-Count, X-Piezas-Omitidas, X-Tiempo-Ms, Content-Disposition',
         },
     )
