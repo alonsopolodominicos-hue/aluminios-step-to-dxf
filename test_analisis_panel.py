@@ -720,6 +720,41 @@ def caso_taladro_de_canto_en_panel_con_forma():
               str(situados[0].get('cara')))
 
 
+def caso_panel_de_canto_curvo():
+    """Un panel OVALADO (todo el perímetro curvo) no se descarta.
+
+    Sus dos caras anchas son planas y el canto entero es UNA superficie
+    cilíndrica, así que solo tiene 2-3 caras planas: el mínimo de 4 lo
+    descartaba entero, sin DXF ni BPP y sin decir nada. Medido en un STEP
+    real del taller (2876+0998): 66 óvalos de 494x247x19 perdidos.
+    """
+    print('CASO: panel de canto curvo (óvalo)')
+    oval = (cq.Workplane('XY').ellipse(247, 123.5).extrude(19))
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'oval.step')
+        cq.exporters.export(oval, ruta)
+        solido = cq.importers.importStep(ruta).solids().val()
+    r = analizar_solido_panel(solido)
+    check('[óvalo] YA no se descarta', r['ok'], str(r.get('motivo')))
+    if not r['ok']:
+        return
+    check('[óvalo] mide 494x247x19',
+          (round(r['largo']), round(r['ancho']), round(r['grosor'])) == (494, 247, 19),
+          f"{r['largo']}x{r['ancho']}x{r['grosor']}")
+    contorno = r.get('contorno') or []
+    check('[óvalo] lleva contorno curvo discretizado (no 4 esquinas)',
+          len(contorno) > 8, f'{len(contorno)} puntos')
+
+    # Una trasera fina (3-4 mm) tampoco se descarta: el taller las corta.
+    fina = cq.Workplane('XY').box(600, 400, 4)
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'fina.step')
+        cq.exporters.export(fina, ruta)
+        solido2 = cq.importers.importStep(ruta).solids().val()
+    r2 = analizar_solido_panel(solido2)
+    check('[óvalo] una trasera de 4 mm se analiza', r2['ok'], str(r2.get('motivo')))
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_inglete_grosor, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -732,7 +767,8 @@ if __name__ == '__main__':
                  caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma,
                  caso_plano_de_panel_sin_texto, caso_galce_abierto_a_cada_cara,
                  caso_hueco_pasante_interior, caso_cara_buena_siempre_la_mecanizada,
-                 caso_cajeado_en_L_no_se_aplana, caso_taladro_de_canto_en_panel_con_forma):
+                 caso_cajeado_en_L_no_se_aplana, caso_taladro_de_canto_en_panel_con_forma,
+                 caso_panel_de_canto_curvo):
         caso()
         print()
     if FALLOS:

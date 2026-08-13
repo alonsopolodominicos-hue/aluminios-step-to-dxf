@@ -529,7 +529,10 @@ def _advertencias_panel(largo, ancho, grosor, angulo_a=0.0, angulo_b=0.0,
 # exactas por sus vértices; arcos/splines muestreados a 0.05mm de flecha).
 # El BPP usa el panel envolvente rectangular; el DXF lleva la forma real.
 
-GROSOR_MIN_PANEL_FORMA = 5.0    # mm — por debajo no es tablero (chapa/lámina)
+# 3 mm: el taller corta traseras y fondos de cajón de 3-4 mm (su catálogo de
+# materiales lleva contrachapado de 4). Con el mínimo en 5 se descartaban
+# enteras y en silencio (93 piezas de 3-4 mm en 2876+0998).
+GROSOR_MIN_PANEL_FORMA = 3.0    # mm — por debajo no es tablero (chapa/lámina)
 GROSOR_MAX_PANEL_FORMA = 80.0   # mm — por encima no es tablero (bloque/macizo)
 DEFLECT_CONTORNO = 0.05         # mm — flecha máxima al discretizar curvas
 TOL_PUNTO_DUP = 1e-3            # mm — puntos consecutivos idénticos del wire
@@ -931,6 +934,18 @@ def analizar_solido_panel(solid):
     """
     faces_planas = [f for f in solid.Faces() if _es_plana(f)]
     if len(faces_planas) < 4:
+        # Panel de canto CURVO (óvalo, estante de frente redondeado): sus dos
+        # caras anchas son planas y TODO el perímetro es una sola superficie
+        # cilíndrica, así que solo hay 2-3 caras planas. Con el mínimo de 4 se
+        # descartaba la pieza entera — ni DXF ni BPP, y sin avisar (medido en
+        # 2876+0998: ~75 óvalos de 494x247x19 perdidos). La ruta de forma sí
+        # sabe sacar su contorno real (discretiza las curvas), y sus propios
+        # filtros (par de caras opuestas con grosor de tablero) siguen
+        # protegiendo de tragarse un cilindro o un herraje.
+        if len(faces_planas) >= 2:
+            forma = _analizar_panel_forma(solid, faces_planas, _clusterizar_caras_planas(faces_planas))
+            if forma is not None:
+                return forma
         return {'ok': False, 'motivo': f'{len(faces_planas)} caras planas (insuficiente para un panel)'}
 
     grupos = _clusterizar_caras_planas(faces_planas)
