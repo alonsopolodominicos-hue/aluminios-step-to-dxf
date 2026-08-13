@@ -30,7 +30,7 @@ from typing import Optional
 import cadquery as cq
 from cadquery import exporters
 from fastapi.concurrency import run_in_threadpool
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -38,6 +38,7 @@ from analisis import analizar_solido
 from analisis_panel import analizar_solido_panel
 from ensamblaje import leer_componentes, solo_piezas, agrupar_iguales, tiene_nombres_utiles
 from desarrollo import analizar_panel_curvado
+from calco2d import calcar_solido
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
@@ -45,7 +46,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13e'
+VERSION_ANALISIS = '2026-08-13f'
 
 app = FastAPI()
 
@@ -318,7 +319,11 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
 
 
 @app.post('/analizar-panel')
-async def analizar_panel(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+async def analizar_panel(
+    file: UploadFile = File(...),
+    forzar_2d: bool = Form(False),
+    authorization: Optional[str] = Header(None),
+):
     """Analiza un STEP de un mueble de madera/melamina: por cada sólido,
     intenta reconocerlo como panel de tablero (largo×ancho×grosor + taladros
     detectados). Devuelve JSON directo, sin DXF ni ZIP — a diferencia de
@@ -328,10 +333,10 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
     require_secreto_compartido(authorization)
 
     _, resultado, componentes = await _cargar_step(file)
-    return await run_in_threadpool(_analizar_panel_sync, resultado, componentes)
+    return await run_in_threadpool(_analizar_panel_sync, resultado, componentes, forzar_2d)
 
 
-def _analizar_panel_sync(resultado, componentes):
+def _analizar_panel_sync(resultado, componentes, forzar_2d=False):
     """Análisis pesado en un hilo aparte (ver _convertir_panel_sync)."""
     entradas = _entradas_a_convertir(resultado, componentes)
     if not entradas:
@@ -343,11 +348,7 @@ def _analizar_panel_sync(resultado, componentes):
     # que nunca nombra una pieza "0" ni "pieza_000".
     for idx, ent in enumerate(entradas, start=1):
         solido = ent.solido
-        analisis = analizar_solido_panel(solido)
-        if not analisis['ok']:
-            curvado = analizar_panel_curvado(solido)
-            if curvado['ok']:
-                analisis = curvado
+        analisis = _analizar_pieza(solido, forzar_2d)
         if not analisis['ok']:
             omitidas.append({'solido': ent.etiqueta or idx, 'material': ent.material,
                              'motivo': analisis['motivo']})
@@ -408,8 +409,46 @@ def _entradas_a_convertir(resultado, componentes):
 
 
 
+def _analizar_pieza(solido, forzar_2d=False):
+    """Cómo se saca el plano de UNA pieza, en orden de preferencia.
+
+    1. Análisis inteligente (medidas + taladros + cajeados + canales).
+    2. Si la pieza es curvada, su desarrollo plano.
+    3. CALCO 2D como salvavidas: la silueta tal cual.
+
+    Antes, cuando 1 y 2 fallaban, la pieza acababa en omitidas.txt y el taller
+    se quedaba SIN PLANO — que es peor que un plano sin mecanizados. Ahora
+    siempre sale algo, y el manifiesto avisa de que esa pieza va sin BPP.
+
+    Con forzar_2d se va directo al calco: es lo que se quiere cuando solo
+    hace falta el dibujo de corte.
+    """
+    if forzar_2d:
+        return calcar_solido(solido)
+    analisis = analizar_solido_panel(solido)
+    if analisis['ok']:
+        return analisis
+    curvado = analizar_panel_curvado(solido)
+    if curvado['ok']:
+        return curvado
+    calco = calcar_solido(solido)
+    if calco['ok']:
+        # Se conserva el motivo del análisis fallido: al operario le sirve
+        # saber POR QUÉ esa pieza va sin mecanizados.
+        calco['advertencias'] = [
+            f"Sin mecanizados reconocidos ({analisis['motivo']}).",
+        ] + list(calco.get('advertencias', []))
+        return calco
+    return analisis   # ni el calco ha podido: se descarta con su motivo
+
+
+
 @app.post('/convertir-panel')
-async def convertir_panel(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+async def convertir_panel(
+    file: UploadFile = File(...),
+    forzar_2d: bool = Form(False),
+    authorization: Optional[str] = Header(None),
+):
     """Como /convertir pero para MUEBLES de madera/melamina: cada sólido se
     analiza como panel de tablero y el ZIP lleva un DXF por pieza (1:1, en el
     origen, con taladros/cajeados y tabla de mecanizados), manifest.txt,
@@ -419,10 +458,11 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
     require_secreto_compartido(authorization)
 
     nombre_original, resultado, componentes = await _cargar_step(file)
-    return await run_in_threadpool(_convertir_panel_sync, nombre_original, resultado, componentes)
+    return await run_in_threadpool(
+        _convertir_panel_sync, nombre_original, resultado, componentes, forzar_2d)
 
 
-def _convertir_panel_sync(nombre_original, resultado, componentes):
+def _convertir_panel_sync(nombre_original, resultado, componentes, forzar_2d=False):
     """Todo el trabajo PESADO de la conversión, en un hilo aparte.
 
     Los endpoints son `async`: si esto corriera en el bucle de eventos,
@@ -453,14 +493,7 @@ def _convertir_panel_sync(nombre_original, resultado, componentes):
         # con el nombre de otra. El nº de sólido queda en el manifiesto para
         # poder rastrearlo.
         for idx, ent in enumerate(entradas, start=1):
-            analisis = analizar_solido_panel(ent.solido)
-            if not analisis['ok']:
-                # Un panel CURVADO (metacrilato, tablero flexible) no es una
-                # caja: sus caras grandes son cilíndricas. Se desarrolla a su
-                # forma plana de corte en vez de descartarlo.
-                curvado = analizar_panel_curvado(ent.solido)
-                if curvado['ok']:
-                    analisis = curvado
+            analisis = _analizar_pieza(ent.solido, forzar_2d)
             if not analisis['ok']:
                 omitidas_lines.append(
                     f"{ent.etiqueta or idx}\t{ent.material or '-'}\t{analisis['motivo']}")

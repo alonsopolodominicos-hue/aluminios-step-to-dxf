@@ -91,6 +91,18 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
     # parecía salir SIN mecanizar. Con esto los trazos miden ~2 cm y se ven.
     doc.header['$LTSCALE'] = round(t / 2, 2)
 
+    # ── Calco 2D: solo la silueta, todo en CONTORNO ─────────────────────────
+    # Cuando el análisis inteligente no ha podido con la pieza (o el operario
+    # ha pedido calco), el dibujo es la proyección de sus aristas y nada más:
+    # ni capas por tipo de mecanizado ni envolvente, porque aquí no se ha
+    # reconocido ninguna operación y pintar capas vacías engañaría.
+    if analisis.get('calco') and analisis.get('polilineas'):
+        for trazo in analisis['polilineas']:
+            if len(trazo) >= 2:
+                msp.add_lwpolyline([(p[0], p[1]) for p in trazo], close=False,
+                                   dxfattribs={'layer': 'CONTORNO'})
+        return doc
+
     # ── Vista principal: contorno del panel 1:1 en el origen ────────────────
     # Con forma no rectangular, el contorno REAL (polilínea cerrada, curvas
     # discretizadas a 0.05mm) más la envolvente en EJES como referencia.
