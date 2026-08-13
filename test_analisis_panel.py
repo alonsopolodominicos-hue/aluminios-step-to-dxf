@@ -586,6 +586,78 @@ def caso_galce_abierto_a_cada_cara():
                   f"{g['abierto_a']}")
 
 
+def caso_hueco_pasante_interior():
+    """Panel con un hueco PASANTE rectangular en medio (paso de cables).
+
+    Antes no aparecía en NINGUNA salida: un hueco pasante no tiene cara-fondo,
+    así que el detector de cajeados no lo veía, y los wires interiores de la
+    cara no se leían nunca. La pieza salía a máquina sin el hueco.
+    """
+    print('CASO: hueco pasante interior')
+    panel = (cq.Workplane('XY').box(600, 400, 16)
+             .faces('>Z').workplane().rect(120, 80).cutThruAll())
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'hueco.step')
+        cq.exporters.export(panel, ruta)
+        solido = cq.importers.importStep(ruta).solids().val()
+    r = analizar_solido_panel(solido)
+    check('[hueco] el panel se analiza', r['ok'], str(r.get('motivo')))
+    huecos = r.get('huecos') or []
+    check('[hueco] detecta 1 hueco interior', len(huecos) == 1, f'huecos={len(huecos)}')
+    if huecos:
+        xs = [p[0] for p in huecos[0]]
+        ys = [p[1] for p in huecos[0]]
+        largo_h = round(max(xs) - min(xs))
+        ancho_h = round(max(ys) - min(ys))
+        check('[hueco] mide 120x80', (largo_h, ancho_h) == (120, 80), f'{largo_h}x{ancho_h}')
+
+    liso = cq.Workplane('XY').box(600, 400, 16)
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'liso.step')
+        cq.exporters.export(liso, ruta)
+        solido2 = cq.importers.importStep(ruta).solids().val()
+    r2 = analizar_solido_panel(solido2)
+    check('[hueco] un panel liso no inventa huecos', len(r2.get('huecos') or []) == 0,
+          str(r2.get('huecos')))
+
+
+def caso_cara_buena_siempre_la_mecanizada():
+    """La cara de referencia es SIEMPRE la que lleva el mecanizado.
+
+    Antes el frente se elegía por un criterio de signo geométrico: la misma
+    pieza, según cómo viniera girada en el STEP, salía unas veces con los
+    taladros en 'frontal' y otras en 'trasera'. El operario no sabía por qué
+    lado ponerla en la máquina.
+    """
+    print('CASO: cara buena = la mecanizada')
+    # Cazoletas de bisagra en UNA sola cara, y la pieza girada 180° para que
+    # esa cara caiga del lado "malo" del criterio geométrico anterior.
+    def con_cazoletas(girado):
+        w = cq.Workplane('XY').box(600, 400, 16)
+        w = (w.faces('<Z').workplane().pushPoints([(-200, 0), (200, 0)])
+              .hole(35, 13))
+        if girado:
+            w = w.rotate((0, 0, 0), (0, 1, 0), 180)
+        return w
+
+    resultados = []
+    for girado in (False, True):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = os.path.join(d, f'caz{int(girado)}.step')
+            cq.exporters.export(con_cazoletas(girado), ruta)
+            solido = cq.importers.importStep(ruta).solids().val()
+        r = analizar_solido_panel(solido)
+        check(f'[cara buena] analiza (girado={girado})', r['ok'], str(r.get('motivo')))
+        caras = {t.get('cara') for t in r.get('taladros') or [] if t.get('cara')}
+        resultados.append(caras)
+
+    # En los dos casos el mecanizado tiene que quedar en la MISMA cara.
+    check('[cara buena] la pieza girada da la misma cara que sin girar',
+          resultados[0] == resultados[1], f'{resultados[0]} vs {resultados[1]}')
+    check('[cara buena] y esa cara es la frontal (la de referencia)',
+          resultados[0] == {'frontal'}, str(resultados[0]))
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_inglete_grosor, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -596,7 +668,8 @@ if __name__ == '__main__':
                  caso_borde_angulado_avisa, caso_pentagono, caso_esquina_redondeada,
                  caso_rectangulo_sin_contorno, caso_escala_de_linea,
                  caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma,
-                 caso_plano_de_panel_sin_texto, caso_galce_abierto_a_cada_cara):
+                 caso_plano_de_panel_sin_texto, caso_galce_abierto_a_cada_cara,
+                 caso_hueco_pasante_interior, caso_cara_buena_siempre_la_mecanizada):
         caso()
         print()
     if FALLOS:
@@ -605,3 +678,4 @@ if __name__ == '__main__':
             print(f'  - {f}')
         sys.exit(1)
     print('✓ Todos los casos pasan')
+

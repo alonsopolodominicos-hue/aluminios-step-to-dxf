@@ -673,6 +673,18 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     contorno3d = _discretizar_wire(cara_frontal.outerWire())
     if contorno3d is None:
         return None
+    # Huecos PASANTES interiores (paso de cables, caja de enchufe…): son los
+    # wires interiores de la cara buena. Nunca se leían y no aparecían ni en
+    # el DXF ni en el BPP; un hueco pasante no tiene cara-fondo, así que el
+    # detector de cajeados tampoco los veía.
+    huecos3d = []
+    try:
+        for w in cara_frontal.innerWires():
+            pts = _discretizar_wire(w)
+            if pts:
+                huecos3d.append(pts)
+    except Exception:
+        huecos3d = []
 
     X = _direccion_eje_contorno(cara_frontal.outerWire(), contorno3d, Z)
     X = _normalizar(_resta(X, _escala(Z, _dot(X, Z))))
@@ -685,6 +697,10 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     ancho = round(max(ys) - y_min, 2)
     grosor = round(elegido['sep'], 2)
     contorno = [[round(x - x_min, 2), round(y - y_min, 2)] for x, y in zip(xs, ys)]
+    huecos = [
+        [[round(_dot(p, X) - x_min, 2), round(_dot(p, Y) - y_min, 2)] for p in pts]
+        for pts in huecos3d
+    ]
 
     # Taladros: mismo pipeline, con un "env" reducido a las dos caras anchas —
     # los taladros de los cantos con forma salen con cara None (solo tabla).
@@ -731,13 +747,22 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
         f'Panel con contorno NO rectangular ({len(contorno)} puntos) — el DXF lleva la forma real; '
         f'largo/ancho ({largo:.0f}x{ancho:.0f}) y el BPP son el panel envolvente.'
     ]
-    return {
+    # Los taladros de CANTO de un panel con forma se quedan sin cara (solo se
+    # exploran las dos caras anchas) y desaparecían del DXF y del BPP sin
+    # dejar rastro: al menos hay que decir cuántos son y que van a mano.
+    sin_cara = sum(1 for t in taladros if t.get('cara') is None)
+    if sin_cara:
+        avisos.append(
+            f'{sin_cara} taladro(s) de CANTO no representados (panel con forma): '
+            f'no salen en el DXF ni en el BPP — hazlos a mano.')
+    return _orientar_a_cara_buena({
         'ok': True,
         'largo': largo,
         'ancho': ancho,
         'grosor': grosor,
         'seccion_regular': False,
         'contorno': contorno,
+        'huecos': huecos,
         'taladros': taladros,
         'taladros_descartados': len(cilindros) - len(validos),
         'cajeados': cajeados,
@@ -746,7 +771,94 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
         'plano_corte_a': pl_a,
         'plano_corte_b': pl_b,
         'advertencias': avisos,
-    }
+    })
+
+
+def _huecos_cara_ancha(faces_planas, grupos, env, nombre):
+    """Contornos de los huecos PASANTES interiores de la cara ancha `nombre`,
+    en coordenadas locales de la pieza (mm desde su esquina).
+
+    Un hueco pasante (paso de cables, caja de enchufe) no tiene cara-fondo, así
+    que el detector de cajeados no lo ve nunca: la única traza que deja en el
+    sólido son los wires INTERIORES de la cara. Sin esto, el hueco no existía
+    ni en el DXF ni en el BPP y la pieza salía a máquina entera.
+    """
+    g = next((k for k, n in env['nombres'].items() if n == nombre), None)
+    if g is None:
+        return []
+    normal = grupos[g]['normal']
+    plano = env['planos'][g]
+    exteriores = [faces_planas[i] for i in grupos[g]['indices']
+                  if abs(_dot(Vector(*faces_planas[i].Center().toTuple()), normal) - plano) < 0.5]
+    if not exteriores:
+        return []
+    cara = max(exteriores, key=lambda f: f.Area())
+    x0 = env.get('eje_min', 0.0)
+    y0 = env.get('y_min', 0.0)
+    salida = []
+    try:
+        for w in cara.innerWires():
+            pts = _discretizar_wire(w)
+            if not pts:
+                continue
+            salida.append([[round(_dot(p, env['eje']) - x0, 2),
+                            round(_dot(p, env['Y']) - y0, 2)] for p in pts])
+    except Exception:
+        return []
+    return salida
+
+
+# Caras que se intercambian al voltear la pieza 180° sobre su eje vertical.
+_VOLTEO_CARA = {
+    'frontal': 'trasera', 'trasera': 'frontal',
+    'lateral_iz': 'lateral_de', 'lateral_de': 'lateral_iz',
+    'superior': 'superior', 'inferior': 'inferior',
+}
+
+
+def _orientar_a_cara_buena(res):
+    """Deja SIEMPRE como cara de referencia la que lleva el mecanizado (la
+    "cara buena" con la que se trabaja en máquina).
+
+    Hasta ahora el frente se elegía por un criterio de signo puramente
+    geométrico (`4·z+2·y+x`), que no tiene nada que ver con qué cara se
+    mecaniza: según cómo viniera girado el sólido en el STEP, la misma pieza
+    salía unas veces con los taladros en 'frontal' y otras en 'trasera', y el
+    operario tenía que adivinar por qué lado ponerla.
+
+    El volteo es un giro rígido de 180° sobre el eje vertical: x' = largo − x,
+    frontal↔trasera y lateral_iz↔lateral_de. La pieza es la misma; solo cambia
+    por qué lado se presenta.
+    """
+    def cuenta(cara):
+        n = sum(1 for t in res.get('taladros') or [] if t.get('cara') == cara)
+        n += sum(1 for c in res.get('cajeados') or [] if c.get('cara') == cara)
+        return n
+
+    if cuenta('trasera') <= cuenta('frontal'):
+        return res  # ya está del derecho (o empate: se respeta lo de siempre)
+
+    L = res['largo']
+    espejo_x = lambda x: None if x is None else round(L - x, 2)
+
+    for t in res.get('taladros') or []:
+        t['cara'] = _VOLTEO_CARA.get(t.get('cara'), t.get('cara'))
+        t['x'] = espejo_x(t.get('x'))
+    for c in res.get('cajeados') or []:
+        c['cara'] = _VOLTEO_CARA.get(c.get('cara'), c.get('cara'))
+        # El cajeado se guarda por su esquina inferior-izquierda: al reflejar
+        # hay que mover el origen al otro extremo de su largo.
+        if c.get('x') is not None:
+            c['x'] = round(L - c['x'] - (c.get('largo') or 0), 2)
+        if c.get('puntos'):
+            c['puntos'] = [[espejo_x(px), py] for px, py in c['puntos']]
+    for clave in ('contorno', ):
+        if res.get(clave):
+            res[clave] = [[espejo_x(px), py] for px, py in res[clave]]
+    if res.get('huecos'):
+        res['huecos'] = [[[espejo_x(px), py] for px, py in h] for h in res['huecos']]
+    res['volteado_a_cara_buena'] = True
+    return res
 
 
 def _cara_ancha_exterior_rectangular(faces_planas, grupos, env, nombre):
@@ -846,17 +958,19 @@ def analizar_solido_panel(solid):
             [env['longitud'], env['ancho_y']], [0.0, env['ancho_y']]]
     cajeados = (_detectar_cajeados(faces_planas, grupos, env, rect)
                 + _detectar_canales_perimetro(solid, env, rect))
+    huecos = _huecos_cara_ancha(faces_planas, grupos, env, 'frontal')
 
     largo = round(env['longitud'], 2)
     ancho = round(env['ancho_y'], 2)
     grosor = round(env['grosor_z'], 2)
 
-    return {
+    return _orientar_a_cara_buena({
         'ok': True,
         'largo': largo,
         'ancho': ancho,
         'grosor': grosor,
         'seccion_regular': env['seccion_regular'],
+        'huecos': huecos,
         'taladros': taladros,
         'taladros_descartados': descartados,
         'cajeados': cajeados,
@@ -868,4 +982,4 @@ def analizar_solido_panel(solid):
             largo, ancho, grosor, env['angulo_corte_a'], env['angulo_corte_b'],
             env.get('plano_corte_a', 'recto'), env.get('plano_corte_b', 'recto'),
             env['seccion_regular'], not taladros and not cajeados),
-    }
+    })

@@ -26,6 +26,7 @@ from dxf import _circulo_taladro
 # tanto en fondo blanco como en negro; el 7 se adapta solo.
 CAPAS_PANEL = [
     ('CONTORNO', 7, 'CONTINUOUS'),
+    ('HUECOS', 2, 'CONTINUOUS'),            # amarillo — hueco PASANTE interior
     ('TALADROS', 1, 'CONTINUOUS'),          # rojo
     ('TALADROS_OCULTOS', 8, 'DASHED'),      # gris — taladro de la cara opuesta
     ('FRESADO', 5, 'CONTINUOUS'),           # azul — cajeado en la cara vista
@@ -99,6 +100,14 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
         _rect(msp, 0, 0, L, A, 'EJES')
     else:
         _rect(msp, 0, 0, L, A, 'CONTORNO')
+
+    # ── Huecos pasantes interiores (paso de cables, caja de enchufe…) ────────
+    # Son wires interiores de la cara: hay que cortarlos igual que el contorno,
+    # y hasta ahora no salían en ninguna parte del DXF.
+    for hueco in analisis.get('huecos') or []:
+        if len(hueco) >= 3:
+            msp.add_lwpolyline([(p[0], p[1]) for p in hueco], close=True,
+                               dxfattribs={'layer': 'HUECOS'})
 
     # ── Taladros ────────────────────────────────────────────────────────────
     for tal in taladros:

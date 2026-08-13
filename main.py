@@ -342,7 +342,7 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
     zip_buffer = io.BytesIO()
-    manifest_lines = ['Pieza\tLargo\tAncho\tGrosor\tTaladros\tCajeados\tAvisos\tUnidad']
+    manifest_lines = ['Pieza\tSólido\tLargo\tAncho\tGrosor\tTaladros\tCajeados\tAvisos\tUnidad']
     omitidas_lines = ['Sólido\tMotivo']
     piezas_json = []
     piezas_generadas = 0
@@ -350,6 +350,13 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         # start=1: numeración 1-based (pieza_001, pieza_002...) igual que
         # Yudigar, que nunca nombra una pieza "0" ni "pieza_000".
+        # Se desglosa el STEP en sus sólidos y se procesa uno a uno. La
+        # numeración va sobre las piezas REALMENTE generadas, no sobre el
+        # índice del sólido: un sólido descartado (un herraje) se comía su
+        # número y la serie salía con saltos (P01, P02, P04), que luego no
+        # casaba con la columna FILE de la OF y mandaba una pieza a máquina
+        # con el nombre de otra. El nº de sólido queda en el manifiesto para
+        # poder rastrearlo.
         for idx, solido in enumerate(solidos, start=1):
             analisis = analizar_solido_panel(solido)
             if not analisis['ok']:
@@ -357,7 +364,8 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
                 continue
 
             piezas_generadas += 1
-            nombre_capa = _safe_filename(f"pieza_{idx:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}")
+            nombre_capa = _safe_filename(
+                f"pieza_{piezas_generadas:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}")
             doc = generar_dxf_panel(nombre_capa, analisis)
             buffer_pieza = io.StringIO()
             doc.write(buffer_pieza)
@@ -365,7 +373,7 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
 
             avisos = analisis['advertencias']
             manifest_lines.append(
-                f"{nombre_capa}.dxf\t{analisis['largo']:.2f}\t{analisis['ancho']:.2f}\t"
+                f"{nombre_capa}.dxf\t{idx}\t{analisis['largo']:.2f}\t{analisis['ancho']:.2f}\t"
                 f"{analisis['grosor']:.2f}\t{len(analisis['taladros'])}\t{len(analisis['cajeados'])}\t"
                 f"{' | '.join(avisos) if avisos else '-'}\tmm"
             )
