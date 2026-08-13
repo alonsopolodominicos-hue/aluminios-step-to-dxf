@@ -45,6 +45,8 @@ a mano), no un dato falso que pueda acabar en un corte real equivocado.
 import math
 
 from cadquery import Vector
+
+import topologia
 from OCP.BRepAdaptor import BRepAdaptor_Curve
 from OCP.BRepTools import BRepTools_WireExplorer
 from OCP.GCPnts import GCPnts_QuasiUniformDeflection
@@ -177,7 +179,7 @@ def _detectar_canales_perimetro(solid, env, contorno):
     clasificador = BRepClass3d_SolidClassifier(solid.wrapped)
 
     resultado = []
-    for f in solid.Faces():
+    for f in topologia.caras(solid):
         # Canto = superficie cuya generatriz va con el grosor. Vale para planos
         # y para cilindros de eje paralelo a Z (los cantos curvos).
         try:
@@ -188,7 +190,7 @@ def _detectar_canales_perimetro(solid, env, contorno):
             continue
         if f.Area() < AREA_MIN_CAJEADO:
             continue
-        vs = [Vector(*v.toTuple()) for v in f.Vertices()]
+        vs = [Vector(*p) for p in topologia.puntos(f)]
         if not vs:
             continue
 
@@ -303,20 +305,25 @@ def _es_circular(face):
     """Contorno circular = fondo de un taladro ciego (o bolsillo redondo,
     fuera del alcance de 'cajeado' — ya cubierto por la detección de taladros)."""
     try:
-        edges = face.Edges()
+        edges = topologia.aristas(face)
         return len(edges) > 0 and all(e.geomType() == 'CIRCLE' for e in edges)
     except Exception:
         return False
 
 
 def _segmentos_cara(face):
-    """Extremos (p1, p2) de cada arista de la cara, en coordenadas globales."""
+    """Extremos (p1, p2) de cada arista de la cara, en coordenadas globales.
+
+    Va por topologia.py y no por face.Edges()/e.Vertices() de cadquery: esta
+    función se llama miles de veces por mueble y era, ella sola, la mitad del
+    tiempo de una conversión (ver la explicación en topologia.py).
+    """
     segmentos = []
     try:
-        for e in face.Edges():
-            vs = e.Vertices()
-            if len(vs) >= 2:
-                segmentos.append((Vector(*vs[0].toTuple()), Vector(*vs[-1].toTuple())))
+        for e in topologia.aristas(face):
+            ext = topologia.extremos(e)
+            if ext is not None:
+                segmentos.append((Vector(*ext[0]), Vector(*ext[1])))
     except Exception:
         pass
     return segmentos
@@ -386,7 +393,7 @@ def _detectar_cajeados(faces_planas, grupos, env, contorno=None):
             if _toca_alguna_cara_exterior(f, segmentos_exteriores):
                 continue  # es la PARED de un bolsillo (o una ranura abierta a canto), no su fondo
 
-            vs = [Vector(*v.toTuple()) for v in f.Vertices()]
+            vs = [Vector(*p) for p in topologia.puntos(f)]
             if not vs:
                 continue
             # Un fondo que LLEGA a la línea de corte no es un bolsillo cerrado:
@@ -664,7 +671,7 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     pares, _ = _emparejar_grupos_opuestos(grupos)
     if not pares:
         return None
-    vertices = [Vector(*v.toTuple()) for v in solid.Vertices()]
+    vertices = [Vector(*p) for p in topologia.puntos(solid)]
     bb = solid.BoundingBox()
     dims = sorted([bb.xmax - bb.xmin, bb.ymax - bb.ymin, bb.zmax - bb.zmin], reverse=True)
 
@@ -932,7 +939,7 @@ def analizar_solido_panel(solid):
     (+ 'contorno' si el panel no es rectangular), o {'ok': False, 'motivo'}
     si el sólido no tiene forma de panel.
     """
-    faces_planas = [f for f in solid.Faces() if _es_plana(f)]
+    faces_planas = [f for f in topologia.caras(solid) if _es_plana(f)]
     if len(faces_planas) < 4:
         # Panel de canto CURVO (óvalo, estante de frente redondeado): sus dos
         # caras anchas son planas y TODO el perímetro es una sola superficie

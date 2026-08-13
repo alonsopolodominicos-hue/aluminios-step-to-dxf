@@ -27,6 +27,8 @@ from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 
 from cadquery.occ_impl.shapes import Shape
 
+import topologia
+
 # Paso de discretización de las curvas al pasarlas a polilínea (mm). El mismo
 # criterio que el resto del servicio: fino para que un arco no se note
 # poligonal en la máquina, sin llenar el DXF de puntos.
@@ -44,7 +46,7 @@ def _direccion_de_vista(solido):
     envolvente, que es el grosor.
     """
     mejor = None
-    for f in solido.Faces():
+    for f in topologia.caras(solido):
         ad = BRepAdaptor_Surface(f.wrapped)
         if ad.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
             continue
@@ -132,7 +134,7 @@ def calcar_solido(solido, incluir_ocultas: bool = False):
             # "Null TopoDS_Shape" y se pierde el calco entero.
             if forma is None or forma.IsNull():
                 continue
-            for e in Shape.cast(forma).Edges():
+            for e in topologia.aristas(Shape.cast(forma)):
                 pts = _discretizar(e)
                 if len(pts) >= 2:
                     polilineas.append(pts)

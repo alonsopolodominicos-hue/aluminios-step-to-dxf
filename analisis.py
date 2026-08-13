@@ -27,6 +27,8 @@ soportados, no se fuerzan.
 import math
 
 from cadquery import Vector
+
+import topologia
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 
 UMBRAL_PARALELO = -0.99        # normales opuestas (caras enfrentadas de la caja)
@@ -161,7 +163,7 @@ def _analizar_envolvente(solid, faces_planas, grupos):
     if not ((len(pares) == 3 and len(sin_emparejar) == 0) or (len(pares) == 2 and len(sin_emparejar) == 2)):
         return None, f'{len(pares)} pares y {len(sin_emparejar)} caras sueltas (no define una caja completa)'
 
-    vertices = [Vector(*v.toTuple()) for v in solid.Vertices()]
+    vertices = [Vector(*p) for p in topologia.puntos(solid)]
 
     # Candidato a "par de extremos": el que da la mayor extensión de la pieza.
     candidatos = []
@@ -293,7 +295,7 @@ def _caras_cilindricas(solid):
     (dirección con signo fijo + punto de la línea más cercano al origen),
     rango axial (proyección de sus vértices sobre la línea) y barrido angular."""
     out = []
-    for f in solid.Faces():
+    for f in topologia.caras(solid):
         if f.geomType() != 'CYLINDER':
             continue
         try:
@@ -310,7 +312,7 @@ def _caras_cilindricas(solid):
             p = Vector(loc.X(), loc.Y(), loc.Z())
             p0 = _resta(p, _escala(d, _dot(p, d)))  # punto de la línea más cercano al origen global
 
-            vs = [Vector(*v.toTuple()) for v in f.Vertices()]
+            vs = [Vector(*p) for p in topologia.puntos(f)]
             if not vs:
                 bb = f.BoundingBox()
                 vs = [Vector(x, y, z) for x in (bb.xmin, bb.xmax) for y in (bb.ymin, bb.ymax) for z in (bb.zmin, bb.zmax)]
@@ -517,7 +519,7 @@ def _fusionar_pasantes_perfil_hueco(taladros, cilindros, env):
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
 def analizar_solido(solid):
-    faces_planas = [f for f in solid.Faces() if _es_plana(f)]
+    faces_planas = [f for f in topologia.caras(solid) if _es_plana(f)]
     if len(faces_planas) < 4:
         return {'ok': False, 'motivo': f'{len(faces_planas)} caras planas (insuficiente para una caja)'}
 

@@ -27,6 +27,8 @@ import math
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.GeomAbs import GeomAbs_SurfaceType
 
+import topologia
+
 # Tolerancia del cuadre de área entre el desarrollo y la cara real (5 %).
 # Por encima, la superficie no es un cilindro simple (tiene recortes o
 # varios radios) y el desarrollo plano no sería fiable.
@@ -40,7 +42,7 @@ GROSOR_MIN, GROSOR_MAX = 0.5, 40.0
 def _cilindros(solido):
     """Caras cilíndricas con su radio, área y rango de ángulo/longitud."""
     salida = []
-    for f in solido.Faces():
+    for f in topologia.caras(solido):
         ad = BRepAdaptor_Surface(f.wrapped)
         if ad.GetType() != GeomAbs_SurfaceType.GeomAbs_Cylinder:
             continue
