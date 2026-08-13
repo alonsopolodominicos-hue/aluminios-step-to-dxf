@@ -29,6 +29,7 @@ from typing import Optional
 
 import cadquery as cq
 from cadquery import exporters
+from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -44,7 +45,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13c'
+VERSION_ANALISIS = '2026-08-13d'
 
 app = FastAPI()
 
@@ -318,7 +319,11 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
     require_secreto_compartido(authorization)
 
     _, resultado, componentes = await _cargar_step(file)
+    return await run_in_threadpool(_analizar_panel_sync, resultado, componentes)
 
+
+def _analizar_panel_sync(resultado, componentes):
+    """Análisis pesado en un hilo aparte (ver _convertir_panel_sync)."""
     entradas = _entradas_a_convertir(resultado, componentes)
     if not entradas:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
@@ -405,7 +410,18 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
     require_secreto_compartido(authorization)
 
     nombre_original, resultado, componentes = await _cargar_step(file)
+    return await run_in_threadpool(_convertir_panel_sync, nombre_original, resultado, componentes)
 
+
+def _convertir_panel_sync(nombre_original, resultado, componentes):
+    """Todo el trabajo PESADO de la conversión, en un hilo aparte.
+
+    Los endpoints son `async`: si esto corriera en el bucle de eventos,
+    bloquearía el proceso entero mientras dura la conversión. Consecuencias
+    reales: /salud dejaba de responder (y la app decía "se está iniciando"
+    cuando en realidad estaba trabajando) y dos conversiones a la vez se
+    ponían en cola sin que nadie lo supiera — la segunda se comía el tiempo
+    de espera del navegador y salía "El servicio no respondió a tiempo"."""
     entradas = _entradas_a_convertir(resultado, componentes)
     if not entradas:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
@@ -483,9 +499,15 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
             zf.writestr('omitidas.txt', '\n'.join(omitidas_lines))
         zf.writestr('analisis_panel.json', json.dumps({
             'piezas': piezas_json,
+            # Las columnas son Pieza / Material / Motivo, y "Pieza" es el
+            # NOMBRE del STEP ('2876_7616 - PMMA_4'), no un número: hacerle
+            # int() reventaba la conversión entera de cualquier STEP con
+            # nombres de pieza (fallo del 13/08, cazado al ejecutar el
+            # endpoint de verdad y no solo el análisis).
             'omitidas': [
-                {'solido': int(l.split('\t')[0]), 'motivo': l.split('\t')[1]}
-                for l in omitidas_lines[1:]
+                {'pieza': partes[0], 'material': partes[1] if len(partes) > 2 else None,
+                 'motivo': partes[-1]}
+                for partes in (l.split('\t') for l in omitidas_lines[1:])
             ],
         }, ensure_ascii=False))
 
