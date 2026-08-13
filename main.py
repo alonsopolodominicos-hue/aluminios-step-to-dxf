@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import tempfile
 import time
@@ -47,7 +48,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13g'
+VERSION_ANALISIS = '2026-08-13h'
 
 app = FastAPI()
 
@@ -159,19 +160,45 @@ async def _cargar_step(file: UploadFile):
     return nombre_original, resultado, componentes
 
 
+def _banco_cpu() -> float:
+    """Milisegundos que tarda esta máquina en una cuenta fija.
+
+    Sirve para comparar peras con peras: el plan gratuito de Render da una
+    fracción de CPU compartida, así que el mismo STEP puede tardar el triple
+    aquí que en un portátil. Sin un número medido no hay forma de saber si
+    una conversión que "no responde a tiempo" es por el arranque en frío, por
+    el tamaño del archivo o porque la máquina va lenta ese rato.
+
+    La cuenta es aritmética pura a propósito: no toca disco ni red, y no
+    depende de OpenCASCADE, así que el número es comparable entre máquinas y
+    entre versiones del servicio.
+    """
+    t0 = time.perf_counter()
+    x = 0.0
+    for i in range(400_000):
+        x += math.sqrt(i % 1000 + 1)
+    return round((time.perf_counter() - t0) * 1000, 1)
+
+
 @app.get('/')
 @app.get('/salud')
-async def salud():
+async def salud(banco: int = 0):
     # Además del "estoy vivo", la VERSIÓN del análisis: sin esto no había
     # forma de saber desde fuera si un despliegue de Render había entrado
     # (el repo espejo no auto-despliega y el servicio contestaba lo mismo
     # con el código viejo que con el nuevo). Subir VERSION_ANALISIS cada vez
     # que cambien las reglas de análisis o el DXF.
-    return JSONResponse({
+    cuerpo = {
         'estado': 'ok',
         'version': VERSION_ANALISIS,
         'commit': (os.environ.get('RENDER_GIT_COMMIT') or '')[:7] or None,
-    })
+    }
+    # Solo bajo petición expresa (/salud?banco=1): la comprobación de salud
+    # normal la llaman el navegador y un cron cada pocos minutos y tiene que
+    # seguir siendo instantánea.
+    if banco:
+        cuerpo['banco_cpu_ms'] = await run_in_threadpool(_banco_cpu)
+    return JSONResponse(cuerpo)
 
 
 @app.post('/previsualizar')
