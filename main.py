@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, Response
 from analisis import analizar_solido
 from analisis_panel import analizar_solido_panel
 from ensamblaje import leer_componentes, solo_piezas, agrupar_iguales, tiene_nombres_utiles
+from desarrollo import analizar_panel_curvado
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
@@ -43,7 +44,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13b'
+VERSION_ANALISIS = '2026-08-13c'
 
 app = FastAPI()
 
@@ -316,23 +317,31 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
     mismo motor BPP ya usado por el resto de la app para muebles."""
     require_secreto_compartido(authorization)
 
-    _, resultado, _componentes = await _cargar_step(file)
+    _, resultado, componentes = await _cargar_step(file)
 
-    solidos = resultado.solids().vals()
-    if not solidos:
+    entradas = _entradas_a_convertir(resultado, componentes)
+    if not entradas:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
     piezas = []
     omitidas = []
     # start=1: numeración 1-based (pieza_001, pieza_002...) igual que Yudigar,
     # que nunca nombra una pieza "0" ni "pieza_000".
-    for idx, solido in enumerate(solidos, start=1):
+    for idx, ent in enumerate(entradas, start=1):
+        solido = ent.solido
         analisis = analizar_solido_panel(solido)
         if not analisis['ok']:
-            omitidas.append({'solido': idx, 'motivo': analisis['motivo']})
+            curvado = analizar_panel_curvado(solido)
+            if curvado['ok']:
+                analisis = curvado
+        if not analisis['ok']:
+            omitidas.append({'solido': ent.etiqueta or idx, 'material': ent.material,
+                             'motivo': analisis['motivo']})
             continue
         piezas.append({
-            'nombre_capa': _safe_filename(f"pieza_{idx:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}"),
+            'nombre_capa': _safe_filename(ent.etiqueta or f"pieza_{idx:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}"),
+            'unidades': ent.unidades,
+            'material': ent.material,
             'largo': analisis['largo'],
             'ancho': analisis['ancho'],
             'grosor': analisis['grosor'],
@@ -419,6 +428,13 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
         # poder rastrearlo.
         for idx, ent in enumerate(entradas, start=1):
             analisis = analizar_solido_panel(ent.solido)
+            if not analisis['ok']:
+                # Un panel CURVADO (metacrilato, tablero flexible) no es una
+                # caja: sus caras grandes son cilíndricas. Se desarrolla a su
+                # forma plana de corte en vez de descartarlo.
+                curvado = analizar_panel_curvado(ent.solido)
+                if curvado['ok']:
+                    analisis = curvado
             if not analisis['ok']:
                 omitidas_lines.append(
                     f"{ent.etiqueta or idx}\t{ent.material or '-'}\t{analisis['motivo']}")
