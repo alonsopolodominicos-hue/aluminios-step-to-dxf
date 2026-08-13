@@ -658,6 +658,68 @@ def caso_cara_buena_siempre_la_mecanizada():
           resultados[0] == {'frontal'}, str(resultados[0]))
 
 
+def caso_cajeado_en_L_no_se_aplana():
+    """Un bolsillo en L sale con su forma real, no como un rectángulo.
+
+    Antes solo se guardaba la caja envolvente (x/y/largo/ancho), así que un
+    bolsillo en L, redondeado o con arcos se fresaba entero: se comía material
+    que tenía que quedarse.
+    """
+    print('CASO: cajeado en L con su contorno real')
+    # Bolsillo en L de 10 mm de profundidad en la cara de arriba.
+    panel = cq.Workplane('XY').box(600, 400, 18)
+    panel = (panel.faces('>Z').workplane()
+             .moveTo(-100, -50).lineTo(100, -50).lineTo(100, 0)
+             .lineTo(0, 0).lineTo(0, 50).lineTo(-100, 50).close()
+             .cutBlind(-10))
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'ele.step')
+        cq.exporters.export(panel, ruta)
+        solido = cq.importers.importStep(ruta).solids().val()
+    r = analizar_solido_panel(solido)
+    check('[cajeado L] analiza', r['ok'], str(r.get('motivo')))
+    cajeados = [c for c in r.get('cajeados') or [] if not c.get('en_canto')]
+    check('[cajeado L] detecta el bolsillo', len(cajeados) >= 1, f'{len(cajeados)}')
+    if cajeados:
+        c = cajeados[0]
+        pts = c.get('puntos')
+        check('[cajeado L] lleva el contorno real (6 vértices, no un rectángulo)',
+              bool(pts) and len(pts) >= 5, f'puntos={len(pts) if pts else 0}')
+
+
+def caso_taladro_de_canto_en_panel_con_forma():
+    """Un taladro en el canto de un panel con FORMA no desaparece.
+
+    Antes solo se exploraban las dos caras anchas: el taladro se quedaba sin
+    cara ('cara': None, sin x/y) y no salía ni en el DXF ni en el BPP ni en
+    pantalla. Ahora se le asigna un canto y su posición en el plano de la
+    pieza, para poder marcarlo (se hace a mano, no entra al BPP).
+    """
+    print('CASO: taladro de canto en panel con forma')
+    # Panel pentagonal (contorno NO rectangular) con un taladro horizontal
+    # entrando por el canto.
+    panel = (cq.Workplane('XY')
+             .polyline([(0, 0), (600, 0), (600, 300), (300, 400), (0, 300)]).close()
+             .extrude(18))
+    panel = (panel.faces('<Y').workplane(centerOption='CenterOfBoundBox')
+             .center(0, 0).hole(8, 30))
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'canto.step')
+        cq.exporters.export(panel, ruta)
+        solido = cq.importers.importStep(ruta).solids().val()
+    r = analizar_solido_panel(solido)
+    check('[canto forma] analiza', r['ok'], str(r.get('motivo')))
+    tal = r.get('taladros') or []
+    check('[canto forma] detecta el taladro', len(tal) >= 1, f'{len(tal)}')
+    situados = [t for t in tal if t.get('x') is not None]
+    check('[canto forma] queda situado (antes se perdía sin x/y)',
+          len(situados) >= 1, str(tal))
+    if situados:
+        check('[canto forma] se le asigna un canto, no una cara ancha',
+              str(situados[0].get('cara') or '').startswith('canto_'),
+              str(situados[0].get('cara')))
+
+
 if __name__ == '__main__':
     for caso in (caso_panel_simple, caso_inglete_grosor, caso_bisagras, caso_sistema32, caso_taladro_canto,
                  caso_pletina_aluminio_no_se_detecta, caso_cajeado_cerrado, caso_ranura_estrecha,
@@ -669,7 +731,8 @@ if __name__ == '__main__':
                  caso_rectangulo_sin_contorno, caso_escala_de_linea,
                  caso_canal_entra_desde_el_borde, caso_canal_en_panel_con_forma,
                  caso_plano_de_panel_sin_texto, caso_galce_abierto_a_cada_cara,
-                 caso_hueco_pasante_interior, caso_cara_buena_siempre_la_mecanizada):
+                 caso_hueco_pasante_interior, caso_cara_buena_siempre_la_mecanizada,
+                 caso_cajeado_en_L_no_se_aplana, caso_taladro_de_canto_en_panel_con_forma):
         caso()
         print()
     if FALLOS:

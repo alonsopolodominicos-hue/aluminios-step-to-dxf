@@ -418,12 +418,29 @@ def _detectar_cajeados(faces_planas, grupos, env, contorno=None):
             if largo <= 0 or ancho <= 0:
                 continue
             forma = 'ranura' if min(largo, ancho) < UMBRAL_RANURA_ANCHO else 'cajeado'
+            # Contorno REAL del fondo del bolsillo. x0/y0/largo/ancho son su
+            # caja envolvente: con eso, un bolsillo en L, redondeado o con
+            # arcos se fresaba como un rectángulo entero y se comía material
+            # que debía quedarse. Con 'puntos', el DXF dibuja la forma que es.
+            puntos = None
+            try:
+                pts3d = _discretizar_wire(f.outerWire())
+                if pts3d and len(pts3d) >= 3:
+                    puntos = [[round(_dot(v, dir_x) - min_x, 2),
+                               round(_dot(v, dir_y) - min_y, 2)] for v in pts3d]
+                    # Si es un rectángulo, no hace falta el contorno: se
+                    # mantiene la salida de siempre (más simple de leer).
+                    if _es_contorno_rectangular([(px, py) for px, py in puntos]):
+                        puntos = None
+            except Exception:
+                puntos = None
             resultado.append({
                 'cara': nombre, 'forma': forma,
                 'en_canto': nombre != 'frontal' and nombre != 'trasera',
                 'x': round(x0, 2), 'y': round(y0, 2),
                 'largo': round(largo, 2), 'ancho': round(ancho, 2),
                 'profundidad': round(profundidad, 2),
+                **({'puntos': puntos} if puntos else {}),
             })
     return resultado
 
@@ -704,12 +721,23 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
 
     # Taladros: mismo pipeline, con un "env" reducido a las dos caras anchas —
     # los taladros de los cantos con forma salen con cara None (solo tabla).
-    grupos_sub = [grupos[g_frontal], grupos[g_trasera]]
+    # Antes aquí solo iban las dos caras anchas, así que un taladro de CANTO
+    # (clavija, confirmat) se quedaba sin cara candidata y desaparecía del DXF
+    # y del BPP sin dejar traza. Ahora entran todos los grupos: los cantos se
+    # nombran 'canto_k' y sus taladros salen situados en el plano de la pieza,
+    # para poder marcarlos en el DXF aunque el BPP no los mecanice.
+    grupos_sub = [grupos[g_frontal], grupos[g_trasera]] + [
+        g for k, g in enumerate(grupos) if k not in (g_frontal, g_trasera)]
     z_min = min(_dot(v, Z) for v in vertices)
+    nombres_sub = {0: 'frontal', 1: 'trasera'}
+    planos_sub = {0: _plano_exterior(vertices, grupos_sub[0]['normal']),
+                  1: _plano_exterior(vertices, grupos_sub[1]['normal'])}
+    for k in range(2, len(grupos_sub)):
+        nombres_sub[k] = f'canto_{k - 1}'
+        planos_sub[k] = _plano_exterior(vertices, grupos_sub[k]['normal'])
     env_sub = {
-        'nombres': {0: 'frontal', 1: 'trasera'},
-        'planos': {0: _plano_exterior(vertices, grupos_sub[0]['normal']),
-                   1: _plano_exterior(vertices, grupos_sub[1]['normal'])},
+        'nombres': nombres_sub,
+        'planos': planos_sub,
         'eje': X, 'Y': Y, 'Z': Z,
         'eje_min': x_min, 'y_min': y_min, 'z_min': z_min,
         'ancho_y': ancho, 'grosor_z': grosor,
@@ -751,10 +779,15 @@ def _analizar_panel_forma(solid, faces_planas, grupos):
     # exploran las dos caras anchas) y desaparecían del DXF y del BPP sin
     # dejar rastro: al menos hay que decir cuántos son y que van a mano.
     sin_cara = sum(1 for t in taladros if t.get('cara') is None)
+    de_canto = sum(1 for t in taladros if str(t.get('cara') or '').startswith('canto_'))
+    if de_canto:
+        avisos.append(
+            f'{de_canto} taladro(s) de CANTO: van MARCADOS en el DXF (capa '
+            f'TALADROS_CANTO) pero NO en el BPP — hazlos a mano.')
     if sin_cara:
         avisos.append(
-            f'{sin_cara} taladro(s) de CANTO no representados (panel con forma): '
-            f'no salen en el DXF ni en el BPP — hazlos a mano.')
+            f'{sin_cara} taladro(s) sin cara asignable: no salen en el DXF ni '
+            f'en el BPP — revísalos a mano.')
     return _orientar_a_cara_buena({
         'ok': True,
         'largo': largo,

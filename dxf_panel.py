@@ -29,6 +29,7 @@ CAPAS_PANEL = [
     ('HUECOS', 2, 'CONTINUOUS'),            # amarillo — hueco PASANTE interior
     ('TALADROS', 1, 'CONTINUOUS'),          # rojo
     ('TALADROS_OCULTOS', 8, 'DASHED'),      # gris — taladro de la cara opuesta
+    ('TALADROS_CANTO', 3, 'CONTINUOUS'),    # verde — taladro en un CANTO (a mano)
     ('FRESADO', 5, 'CONTINUOUS'),           # azul — cajeado en la cara vista
     ('FRESADO_OCULTO', 30, 'DASHED'),       # naranja — cajeado en la trasera
     ('CANALES', 6, 'DASHED'),               # magenta — ranuras en los CANTOS
@@ -127,6 +128,15 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
             borde_x = 0 if cara == 'lateral_iz' else L
             signo = -1 if cara == 'lateral_iz' else 1
             msp.add_line((borde_x, x), (borde_x + signo * t * 1.2, x), dxfattribs={'layer': 'TALADROS'})
+        elif str(cara or '').startswith('canto_') and x is not None:
+            # Canto de un panel con FORMA (no es ninguno de los 4 de la caja):
+            # antes desaparecía del plano. Se marca en su sitio con una cruz y
+            # un círculo a diámetro, en capa propia: el BPP no lo mecaniza, se
+            # hace a mano y el operario necesita verlo.
+            r = d / 2 if d else 2.0
+            msp.add_circle((x, y), r, dxfattribs={'layer': 'TALADROS_CANTO'})
+            msp.add_line((x - r * 1.6, y), (x + r * 1.6, y), dxfattribs={'layer': 'TALADROS_CANTO'})
+            msp.add_line((x, y - r * 1.6), (x, y + r * 1.6), dxfattribs={'layer': 'TALADROS_CANTO'})
 
     # ── Cajeados / ranuras ──────────────────────────────────────────────────
     # En CARA (frontal/trasera): rectángulo a cota, en su posición real.
@@ -146,7 +156,14 @@ def generar_dxf_panel(nombre_capa, analisis, insunits=4, measurement=1):
 
         if not caj.get('en_canto'):
             capa = 'FRESADO_OCULTO' if cara == 'trasera' else 'FRESADO'
-            _rect(msp, x0, y0, x0 + caj['largo'], y0 + caj['ancho'], capa)
+            # Con contorno real (bolsillo en L, redondeado, con arcos) se
+            # dibuja la forma que es; sin él, la caja envolvente de siempre.
+            forma_real = caj.get('puntos')
+            if forma_real and len(forma_real) >= 3:
+                msp.add_lwpolyline([(q[0], q[1]) for q in forma_real], close=True,
+                                   dxfattribs={'layer': capa})
+            else:
+                _rect(msp, x0, y0, x0 + caj['largo'], y0 + caj['ancho'], capa)
             continue
 
         # Traza REAL del fondo, tal cual sale de la geometría del sólido: sirve
