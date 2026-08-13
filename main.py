@@ -160,6 +160,67 @@ async def _cargar_step(file: UploadFile):
     return nombre_original, resultado, componentes
 
 
+# ── Caja negra ────────────────────────────────────────────────────────────
+#
+# Cuando alguien del taller dice "no responde a tiempo" no hay forma de saber
+# qué pasó: si la petición ni siquiera llegó (se quedó subiendo en la oficina),
+# si llegó y tardó mucho, o si el contenedor se quedó sin memoria y Render lo
+# reinició — un reinicio mata la petición en curso y desde el navegador se ve
+# EXACTAMENTE igual que un cuelgue. Esto lo distingue.
+
+ARRANQUE = time.time()
+ULTIMAS_PETICIONES: list[dict] = []
+MAX_PETICIONES = 15
+
+
+def _memoria_mb() -> dict:
+    """Memoria del proceso. El plan gratuito de Render corta a 512 MB."""
+    datos = {}
+    try:
+        import resource
+        pico = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux da KB; macOS da bytes.
+        datos['pico_mb'] = round(pico / (1024 * 1024 if pico > 10 ** 7 else 1024), 1)
+    except Exception:
+        pass
+    try:
+        # RSS actual, solo en Linux (que es donde corre de verdad).
+        with open('/proc/self/status') as f:
+            for linea in f:
+                if linea.startswith('VmRSS:'):
+                    datos['actual_mb'] = round(int(linea.split()[1]) / 1024, 1)
+                    break
+    except Exception:
+        pass
+    return datos
+
+
+@app.middleware('http')
+async def _caja_negra(request, call_next):
+    """Anota cada petición: cuánto pesaba, cuánto tardó y cómo acabó."""
+    if request.url.path in ('/', '/salud'):
+        return await call_next(request)
+    t0 = time.time()
+    estado = 'error'
+    try:
+        respuesta = await call_next(request)
+        estado = str(respuesta.status_code)
+        return respuesta
+    finally:
+        try:
+            ULTIMAS_PETICIONES.append({
+                'ruta': request.url.path,
+                'mb': round(int(request.headers.get('content-length', 0)) / 1e6, 2),
+                'segundos': round(time.time() - t0, 1),
+                'estado': estado,
+                'hace_s': 0,   # se recalcula al leerlo
+                '_t': time.time(),
+            })
+            del ULTIMAS_PETICIONES[:-MAX_PETICIONES]
+        except Exception:
+            pass
+
+
 def _banco_cpu() -> float:
     """Milisegundos que tarda esta máquina en una cuenta fija.
 
@@ -188,10 +249,20 @@ async def salud(banco: int = 0):
     # (el repo espejo no auto-despliega y el servicio contestaba lo mismo
     # con el código viejo que con el nuevo). Subir VERSION_ANALISIS cada vez
     # que cambien las reglas de análisis o el DXF.
+    ahora = time.time()
     cuerpo = {
         'estado': 'ok',
         'version': VERSION_ANALISIS,
         'commit': (os.environ.get('RENDER_GIT_COMMIT') or '')[:7] or None,
+        # Si esto se reinicia solo, es que al contenedor lo han matado (casi
+        # siempre por memoria) y con él la conversión que hubiera en marcha.
+        'lleva_encendido_s': round(ahora - ARRANQUE),
+        'memoria': _memoria_mb(),
+        'ultimas_peticiones': [
+            {**{k: v for k, v in p.items() if not k.startswith('_')},
+             'hace_s': round(ahora - p['_t'])}
+            for p in reversed(ULTIMAS_PETICIONES)
+        ],
     }
     # Solo bajo petición expresa (/salud?banco=1): la comprobación de salud
     # normal la llaman el navegador y un cron cada pocos minutos y tiene que
