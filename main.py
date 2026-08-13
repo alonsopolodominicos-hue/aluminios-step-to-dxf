@@ -49,7 +49,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13j'
+VERSION_ANALISIS = '2026-08-13k'
 
 app = FastAPI()
 
@@ -117,9 +117,23 @@ def require_secreto_compartido(authorization: Optional[str]) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _solidos_de(resultado):
-    """Sólidos del STEP ya cargado, con el criterio de siempre."""
-    return resultado.solids().vals()
+def _solidos_de(resultado, componentes=None):
+    """Todos los sólidos del STEP, venga de donde venga la lectura.
+
+    Con `resultado` (cadquery) se usa ese, que es el orden de siempre. Si el
+    STEP se leyó solo como ensamblaje —para no cargarlo dos veces, ver
+    _cargar_step— se sacan de los componentes: es el mismo conjunto de
+    cuerpos, porque leer_componentes ya crea un Componente por sólido.
+    """
+    if resultado is not None:
+        return resultado.solids().vals()
+    return [c.solido for c in (componentes or [])]
+
+
+def _ensamblaje_utilizable(componentes) -> bool:
+    """¿El ensamblaje basta por sí solo para saber qué convertir y cómo se
+    llama cada pieza? Si sí, no hace falta cargar el STEP con cadquery."""
+    return bool(componentes) and tiene_nombres_utiles(componentes) and bool(solo_piezas(componentes))
 
 
 def _safe_filename(name: str) -> str:
@@ -127,15 +141,38 @@ def _safe_filename(name: str) -> str:
     return cleaned[:48] or 'pieza'
 
 
-async def _cargar_step(file: UploadFile):
-    """Lee el UploadFile, lo escribe a un temporal y lo carga con cadquery.
+async def _cargar_step(file: UploadFile, exigir_cadquery: bool = True):
+    """Lee el UploadFile, lo escribe a un temporal y carga la geometría.
     Devuelve (nombre_original, resultado_cadquery, componentes). Lanza
     HTTPException 400 si el archivo está vacío o no se puede leer como STEP.
 
     `componentes` es la lectura del STEP como ENSAMBLAJE (nombres de producto,
     repeticiones y cuerpos TOOL) — ver ensamblaje.py. Va vacía si el STEP no
     trae esa estructura, y entonces el llamador sigue por el camino de
-    siempre (un sólido = una pieza, numerada por orden)."""
+    siempre (un sólido = una pieza, numerada por orden).
+
+    SE PARSEA UNA VEZ, NO DOS
+    -------------------------
+    Antes se hacían SIEMPRE las dos lecturas: `importStep` de cadquery y
+    `leer_componentes`. Cuando el ensamblaje trae nombres útiles —los STEP del
+    taller los traen— el flujo de muebles saca de ahí las piezas, sus nombres,
+    sus unidades y su material, y no toca `resultado` para nada: la lectura de
+    cadquery era trabajo tirado.
+
+    Lo que se ahorra es TIEMPO, no memoria. Medido en un STEP de 8 MB con 611
+    cuerpos: `importStep` tarda 0,9 s en un portátil, o sea unos 18 s en el
+    plan gratuito de Render, que va ~20 veces más lento. En memoria NO se gana
+    nada, y conviene dejarlo escrito para que nadie lo vuelva a intentar por
+    ahí: las dos lecturas juntas piden casi lo mismo que una sola (+43 MB
+    frente a +48 en 2876_6425, +96 frente a +102 en el de 611 cuerpos) porque
+    OpenCASCADE reaprovecha la memoria de la primera. El gasto de memoria que
+    sí importaba era otro, y está resuelto en stl_conjunto.py.
+
+    `exigir_cadquery=True` la fuerza igualmente: los endpoints de PERFILES
+    numeran las piezas por el orden en que las devuelve cadquery
+    (pieza_001, pieza_002…) y ese orden acaba en el nombre del programa de
+    máquina, así que ahí no se toca.
+    """
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail='El archivo está vacío')
@@ -150,11 +187,13 @@ async def _cargar_step(file: UploadFile):
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp.write(raw)
             tmp_path = tmp.name
-        resultado = cq.importers.importStep(tmp_path)
         try:
             componentes = leer_componentes(tmp_path)
         except Exception:
             componentes = []   # sin estructura: se sigue por el camino de siempre
+        resultado = None
+        if exigir_cadquery or not _ensamblaje_utilizable(componentes):
+            resultado = cq.importers.importStep(tmp_path)
     except HTTPException:
         raise
     except Exception as e:
@@ -441,7 +480,7 @@ async def analizar_panel(
     mismo motor BPP ya usado por el resto de la app para muebles."""
     require_secreto_compartido(authorization)
 
-    _, resultado, componentes = await _cargar_step(file)
+    _, resultado, componentes = await _cargar_step(file, exigir_cadquery=False)
     return await run_in_threadpool(_analizar_panel_sync, resultado, componentes, forzar_2d)
 
 
@@ -514,6 +553,13 @@ def _entradas_a_convertir(resultado, componentes):
                          unidades=n, material=c.material)
                 for c, n in agrupar_iguales(piezas)
             ]
+    if resultado is None:
+        # No debería pasar (_cargar_step solo se salta cadquery cuando el
+        # ensamblaje es utilizable), pero si pasara es mejor un mensaje claro
+        # que un AttributeError a mitad de conversión.
+        raise HTTPException(
+            status_code=400,
+            detail='El STEP no trae nombres de pieza y no se pudo leer su geometría')
     return [_Entrada(solido=s) for s in resultado.solids().vals()]
 
 
@@ -609,7 +655,7 @@ async def convertir_panel(
     reparto de trabajo que el flujo de perfiles)."""
     require_secreto_compartido(authorization)
 
-    nombre_original, resultado, componentes = await _cargar_step(file)
+    nombre_original, resultado, componentes = await _cargar_step(file, exigir_cadquery=False)
     return await run_in_threadpool(
         _convertir_panel_sync, nombre_original, resultado, componentes, forzar_2d)
 
@@ -720,7 +766,7 @@ def _convertir_panel_sync(nombre_original, resultado, componentes, forzar_2d=Fal
         try:
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                 tmp_stl = tmp.name
-            escribir_stl_conjunto(_solidos_de(resultado), tmp_stl)
+            escribir_stl_conjunto(_solidos_de(resultado, componentes), tmp_stl)
             # zf.write() lee el fichero por trozos; writestr(f.read()) metía
             # el STL ENTERO en memoria (y otra copia comprimida).
             zf.write(tmp_stl, 'conjunto_completo.stl')
