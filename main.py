@@ -41,6 +41,7 @@ from ensamblaje import leer_componentes, solo_piezas, agrupar_iguales, tiene_nom
 from desarrollo import analizar_panel_curvado
 from calco2d import calcar_solido
 from medidor_dxf import medir_dxf
+from stl_conjunto import escribir_stl_conjunto
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
@@ -48,7 +49,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13i'
+VERSION_ANALISIS = '2026-08-13j'
 
 app = FastAPI()
 
@@ -115,6 +116,11 @@ def require_secreto_compartido(authorization: Optional[str]) -> None:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _solidos_de(resultado):
+    """Sólidos del STEP ya cargado, con el criterio de siempre."""
+    return resultado.solids().vals()
+
 
 def _safe_filename(name: str) -> str:
     cleaned = ''.join(c if (c.isalnum() or c in ('-', '_')) else '_' for c in name.strip().replace(' ', '_'))
@@ -295,9 +301,13 @@ async def previsualizar(file: UploadFile = File(...), authorization: Optional[st
             try:
                 with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                     tmp_stl = tmp.name
-                exporters.export(solido, tmp_stl, exportType='STL')
-                with open(tmp_stl, 'rb') as f:
-                    zf.writestr(f'pieza_{idx:03d}.stl', f.read())
+                escribir_stl_conjunto([solido], tmp_stl)
+                # zf.write() en vez de writestr(f.read()): no mete el STL
+                # entero en memoria. Y escribir_stl_conjunto suelta la malla
+                # de cada sólido al terminar — con exporters.export se
+                # quedaban pegadas a la geometría y las 136 piezas de una
+                # cocina se acumulaban hasta tirar el contenedor.
+                zf.write(tmp_stl, f'pieza_{idx:03d}.stl')
             except Exception as e:
                 print(f'[previsualizar] sólido {idx} no se pudo teselar: {type(e).__name__}: {e}')
             finally:
@@ -385,12 +395,12 @@ async def convertir(file: UploadFile = File(...), authorization: Optional[str] =
         try:
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                 tmp_stl = tmp.name
-            exporters.export(resultado.val(), tmp_stl, exportType='STL')
+            # Pieza a pieza, soltando cada malla: el ensamblaje entero de
+            # una tacada pedía +293 MB de pico y mataba el contenedor (ver
+            # stl_conjunto.py).
+            escribir_stl_conjunto(_solidos_de(resultado), tmp_stl)
             # zf.write() lee el fichero por trozos; writestr(f.read()) metía
-            # el STL ENTERO en memoria (y otra copia comprimida). En un
-            # conjunto grande son decenas de MB de más en un servicio con
-            # 512 MB — una de las formas de quedarse sin memoria a mitad de
-            # conversión y que el navegador acabe con "no respondió a tiempo".
+            # el STL ENTERO en memoria (y otra copia comprimida).
             zf.write(tmp_stl, 'conjunto_completo.stl')
         except Exception as e:
             print(f'[convertir] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
@@ -696,17 +706,23 @@ def _convertir_panel_sync(nombre_original, resultado, componentes, forzar_2d=Fal
             ],
         }, ensure_ascii=False))
 
-        # Conjunto completo en 3D — mismo export de referencia que /convertir.
+        # Conjunto completo en 3D, de referencia.
+        #
+        # Va por escribir_stl_conjunto (pieza a pieza, soltando cada malla) y
+        # NO por exporters.export del ensamblaje entero. Medido en una cocina
+        # real: aquella llamada pedía +293 MB de pico para escribir 1,6 MB,
+        # porque teselaba las 136 piezas a la vez y se quedaba las mallas en
+        # memoria. Con 512 MB de contenedor y ~483 MB ya ocupados solo por
+        # importar OpenCASCADE, eso mataba el proceso JUSTO AL FINAL, con todo
+        # el trabajo hecho, y el navegador lo veía como "no respondió a
+        # tiempo". Pieza a pieza el pico es de +3 MB.
         tmp_stl = None
         try:
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
                 tmp_stl = tmp.name
-            exporters.export(resultado.val(), tmp_stl, exportType='STL')
+            escribir_stl_conjunto(_solidos_de(resultado), tmp_stl)
             # zf.write() lee el fichero por trozos; writestr(f.read()) metía
-            # el STL ENTERO en memoria (y otra copia comprimida). En un
-            # conjunto grande son decenas de MB de más en un servicio con
-            # 512 MB — una de las formas de quedarse sin memoria a mitad de
-            # conversión y que el navegador acabe con "no respondió a tiempo".
+            # el STL ENTERO en memoria (y otra copia comprimida).
             zf.write(tmp_stl, 'conjunto_completo.stl')
         except Exception as e:
             print(f'[convertir-panel] no se pudo exportar el conjunto completo a STL: {type(e).__name__}: {e}')
