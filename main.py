@@ -39,6 +39,7 @@ from analisis_panel import analizar_solido_panel
 from ensamblaje import leer_componentes, solo_piezas, agrupar_iguales, tiene_nombres_utiles
 from desarrollo import analizar_panel_curvado
 from calco2d import calcar_solido
+from medidor_dxf import medir_dxf
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
@@ -46,7 +47,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13f'
+VERSION_ANALISIS = '2026-08-13g'
 
 app = FastAPI()
 
@@ -440,6 +441,49 @@ def _analizar_pieza(solido, forzar_2d=False):
         ] + list(calco.get('advertencias', []))
         return calco
     return analisis   # ni el calco ha podido: se descarta con su motivo
+
+
+
+@app.post('/medir-dxf')
+async def medir_dxf_endpoint(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(None),
+):
+    """Mide las piezas de un DXF: cuánto miden de largo y de ancho de verdad.
+
+    No convierte nada ni genera programas de máquina: solo mide. Sirve para
+    un DXF de nesting o un plano de taller donde las piezas vienen giradas
+    para aprovechar el tablero — la medida sale correcta igualmente porque se
+    calcula con la caja envolvente mínima (calibre rotatorio), no con la caja
+    recta del dibujo.
+    """
+    require_secreto_compartido(authorization)
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail='El archivo está vacío')
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.dxf', delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+        # Medir es CPU: va al threadpool para no bloquear el servicio.
+        resultado = await run_in_threadpool(medir_dxf, tmp_path)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not resultado['piezas']:
+        raise HTTPException(
+            status_code=400,
+            detail=' '.join(resultado['avisos']) or 'No se ha podido medir el DXF',
+        )
+    return JSONResponse({
+        'archivo': file.filename or 'plano.dxf',
+        'piezas': resultado['piezas'],
+        'avisos': resultado['avisos'],
+    })
 
 
 
