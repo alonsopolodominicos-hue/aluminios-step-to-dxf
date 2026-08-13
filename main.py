@@ -37,6 +37,12 @@ from analisis_panel import analizar_solido_panel
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
+# Versión del motor de análisis/DXF. Se ve en /salud para poder comprobar
+# que un despliegue de Render ha entrado de verdad.
+#   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
+#   cajeados con contorno real, taladros de canto y numeración sin saltos.
+VERSION_ANALISIS = '2026-08-13'
+
 app = FastAPI()
 
 # El navegador sube los STEP DIRECTAMENTE aquí (Vercel rechaza cuerpos de más
@@ -139,7 +145,16 @@ async def _cargar_step(file: UploadFile):
 @app.get('/')
 @app.get('/salud')
 async def salud():
-    return JSONResponse({'estado': 'ok'})
+    # Además del "estoy vivo", la VERSIÓN del análisis: sin esto no había
+    # forma de saber desde fuera si un despliegue de Render había entrado
+    # (el repo espejo no auto-despliega y el servicio contestaba lo mismo
+    # con el código viejo que con el nuevo). Subir VERSION_ANALISIS cada vez
+    # que cambien las reglas de análisis o el DXF.
+    return JSONResponse({
+        'estado': 'ok',
+        'version': VERSION_ANALISIS,
+        'commit': (os.environ.get('RENDER_GIT_COMMIT') or '')[:7] or None,
+    })
 
 
 @app.post('/previsualizar')
