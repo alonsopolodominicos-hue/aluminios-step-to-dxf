@@ -37,9 +37,12 @@ from cadquery.occ_impl.shapes import Shape
 # Un cuerpo cuyo nombre empieza por TOOL no es una pieza: es la herramienta con
 # la que se mecaniza (una ranura, un galce). Convención de autokitchen.
 PREFIJO_HERRAMIENTA = 'TOOL'
-# Volumen mínimo de intersección para dar por buena una resta (mm³): por
-# debajo es contacto o tolerancia de modelado, no un mecanizado.
-VOLUMEN_MIN_RESTA = 200.0
+# Nombres que NO identifican una pieza: los pone el traductor de STEP, no el
+# diseñador. Un STEP exportado por cadquery/OCC los lleva en todos los
+# cuerpos, y tomarlos por nombres de pieza haría que todas se llamaran igual.
+GENERICOS = re.compile(
+    r'^(open[ _]cascade|step[ _]translator|product|shape|solid|compound|part|body)',
+    re.IGNORECASE)
 
 
 @dataclass
@@ -50,6 +53,12 @@ class Componente:
     es_herramienta: bool = False
     material: str | None = None    # 'PMMA', 'FLEX'… si el nombre lo dice
     herramientas_aplicadas: list[str] = field(default_factory=list)
+
+    @property
+    def nombre_util(self) -> bool:
+        """¿El nombre identifica de verdad a esta pieza?"""
+        n = self.nombre.strip()
+        return bool(n) and not GENERICOS.match(n)
 
     @property
     def nombre_limpio(self) -> str:
@@ -152,6 +161,17 @@ def _se_cruzan(a, b) -> bool:
     return not (ba.xmin > bb.xmax or ba.xmax < bb.xmin
                 or ba.ymin > bb.ymax or ba.ymax < bb.ymin
                 or ba.zmin > bb.zmax or ba.zmax < bb.zmin)
+
+
+def tiene_nombres_utiles(componentes: list[Componente]) -> bool:
+    """¿Este STEP viene con nombres de pieza de verdad?
+
+    Se exige más de un nombre distinto: si todos los cuerpos se llaman igual
+    (típico del traductor de STEP), los nombres no distinguen nada y hay que
+    seguir numerando por orden como siempre.
+    """
+    utiles = {c.nombre.strip() for c in componentes if c.nombre_util}
+    return len(utiles) > 1
 
 
 def solo_piezas(componentes: list[Componente]) -> list[Componente]:

@@ -16,6 +16,7 @@ Piezas que no son una caja de 6 caras planas (herraje: tornillos, bisagras,
 geometría curva) se omiten y se listan aparte en el manifest — no se genera
 un DXF inventado para ellas.
 """
+from dataclasses import dataclass
 import hashlib
 import hmac
 import io
@@ -34,6 +35,7 @@ from fastapi.responses import JSONResponse, Response
 
 from analisis import analizar_solido
 from analisis_panel import analizar_solido_panel
+from ensamblaje import leer_componentes, solo_piezas, agrupar_iguales, tiene_nombres_utiles
 from dxf import generar_dxf_pieza
 from dxf_panel import generar_dxf_panel
 
@@ -41,7 +43,7 @@ from dxf_panel import generar_dxf_panel
 # que un despliegue de Render ha entrado de verdad.
 #   2026-08-13: paneles de canto curvo, huecos pasantes, cara buena,
 #   cajeados con contorno real, taladros de canto y numeración sin saltos.
-VERSION_ANALISIS = '2026-08-13'
+VERSION_ANALISIS = '2026-08-13b'
 
 app = FastAPI()
 
@@ -116,8 +118,13 @@ def _safe_filename(name: str) -> str:
 
 async def _cargar_step(file: UploadFile):
     """Lee el UploadFile, lo escribe a un temporal y lo carga con cadquery.
-    Devuelve (nombre_original, resultado_cadquery). Lanza HTTPException 400
-    si el archivo está vacío o no se puede leer como STEP."""
+    Devuelve (nombre_original, resultado_cadquery, componentes). Lanza
+    HTTPException 400 si el archivo está vacío o no se puede leer como STEP.
+
+    `componentes` es la lectura del STEP como ENSAMBLAJE (nombres de producto,
+    repeticiones y cuerpos TOOL) — ver ensamblaje.py. Va vacía si el STEP no
+    trae esa estructura, y entonces el llamador sigue por el camino de
+    siempre (un sólido = una pieza, numerada por orden)."""
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail='El archivo está vacío')
@@ -133,13 +140,19 @@ async def _cargar_step(file: UploadFile):
             tmp.write(raw)
             tmp_path = tmp.name
         resultado = cq.importers.importStep(tmp_path)
+        try:
+            componentes = leer_componentes(tmp_path)
+        except Exception:
+            componentes = []   # sin estructura: se sigue por el camino de siempre
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'No se pudo leer el STEP: {e}')
     finally:
         if tmp_path:
             os.unlink(tmp_path)
 
-    return nombre_original, resultado
+    return nombre_original, resultado, componentes
 
 
 @app.get('/')
@@ -165,7 +178,7 @@ async def previsualizar(file: UploadFile = File(...), authorization: Optional[st
     de canto desde el ángulo de cámara por defecto. No hace ningún análisis,
     solo tesela la geometría de cada sólido tal cual viene."""
     require_secreto_compartido(authorization)
-    _, resultado = await _cargar_step(file)
+    _, resultado, _componentes = await _cargar_step(file)
 
     solidos = resultado.solids().vals()
     if not solidos:
@@ -198,7 +211,7 @@ async def previsualizar(file: UploadFile = File(...), authorization: Optional[st
 async def convertir(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     require_secreto_compartido(authorization)
 
-    nombre_original, resultado = await _cargar_step(file)
+    nombre_original, resultado, componentes = await _cargar_step(file)
 
     solidos = resultado.solids().vals()
     if not solidos:
@@ -303,7 +316,7 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
     mismo motor BPP ya usado por el resto de la app para muebles."""
     require_secreto_compartido(authorization)
 
-    _, resultado = await _cargar_step(file)
+    _, resultado, _componentes = await _cargar_step(file)
 
     solidos = resultado.solids().vals()
     if not solidos:
@@ -340,6 +353,38 @@ async def analizar_panel(file: UploadFile = File(...), authorization: Optional[s
     return JSONResponse({'piezas': piezas, 'omitidas': omitidas})
 
 
+@dataclass
+class _Entrada:
+    """Un cuerpo a convertir, con lo que el ensamblaje sabe de él."""
+    solido: object
+    etiqueta: str | None = None   # nombre del STEP ('P01'); None = numerar por orden
+    unidades: int = 1
+    material: str | None = None
+
+
+def _entradas_a_convertir(resultado, componentes):
+    """Qué hay que convertir y cómo se llama.
+
+    Con ensamblaje: una entrada por pieza DISTINTA, con su nombre del STEP,
+    sus unidades y su material, y sin los cuerpos TOOL. Sin ensamblaje: un
+    sólido = una entrada, como siempre.
+    """
+    if componentes and tiene_nombres_utiles(componentes):
+        piezas = solo_piezas(componentes)
+        if piezas:
+            return [
+                # Nombre COMPLETO del STEP: ya viene con el convenio de la OF
+                # (2876_7616P01), así que el ZIP sale con el nombre definitivo
+                # y el renombrado del cliente (que solo toca "pieza_NNN") lo
+                # respeta tal cual.
+                _Entrada(solido=c.solido, etiqueta=c.nombre.strip() or None,
+                         unidades=n, material=c.material)
+                for c, n in agrupar_iguales(piezas)
+            ]
+    return [_Entrada(solido=s) for s in resultado.solids().vals()]
+
+
+
 @app.post('/convertir-panel')
 async def convertir_panel(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     """Como /convertir pero para MUEBLES de madera/melamina: cada sólido se
@@ -350,15 +395,15 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
     reparto de trabajo que el flujo de perfiles)."""
     require_secreto_compartido(authorization)
 
-    nombre_original, resultado = await _cargar_step(file)
+    nombre_original, resultado, componentes = await _cargar_step(file)
 
-    solidos = resultado.solids().vals()
-    if not solidos:
+    entradas = _entradas_a_convertir(resultado, componentes)
+    if not entradas:
         raise HTTPException(status_code=400, detail='El STEP no contiene ningún sólido')
 
     zip_buffer = io.BytesIO()
-    manifest_lines = ['Pieza\tSólido\tLargo\tAncho\tGrosor\tTaladros\tCajeados\tAvisos\tUnidad']
-    omitidas_lines = ['Sólido\tMotivo']
+    manifest_lines = ['Pieza\tUds\tMaterial\tLargo\tAncho\tGrosor\tTaladros\tCajeados\tAvisos\tUnidad']
+    omitidas_lines = ['Pieza\tMaterial\tMotivo']
     piezas_json = []
     piezas_generadas = 0
 
@@ -372,15 +417,18 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
         # casaba con la columna FILE de la OF y mandaba una pieza a máquina
         # con el nombre de otra. El nº de sólido queda en el manifiesto para
         # poder rastrearlo.
-        for idx, solido in enumerate(solidos, start=1):
-            analisis = analizar_solido_panel(solido)
+        for idx, ent in enumerate(entradas, start=1):
+            analisis = analizar_solido_panel(ent.solido)
             if not analisis['ok']:
-                omitidas_lines.append(f"{idx}\t{analisis['motivo']}")
+                omitidas_lines.append(
+                    f"{ent.etiqueta or idx}\t{ent.material or '-'}\t{analisis['motivo']}")
                 continue
 
             piezas_generadas += 1
+            # Con ensamblaje, el nombre es el del STEP (ya trae el convenio de
+            # la OF: P01, P02…); sin él, la numeración de siempre.
             nombre_capa = _safe_filename(
-                f"pieza_{piezas_generadas:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}")
+                ent.etiqueta or f"pieza_{piezas_generadas:03d}_{analisis['largo']:.0f}x{analisis['ancho']:.0f}")
             doc = generar_dxf_panel(nombre_capa, analisis)
             buffer_pieza = io.StringIO()
             doc.write(buffer_pieza)
@@ -388,12 +436,15 @@ async def convertir_panel(file: UploadFile = File(...), authorization: Optional[
 
             avisos = analisis['advertencias']
             manifest_lines.append(
-                f"{nombre_capa}.dxf\t{idx}\t{analisis['largo']:.2f}\t{analisis['ancho']:.2f}\t"
+                f"{nombre_capa}.dxf\t{ent.unidades}\t{ent.material or '-'}\t"
+                f"{analisis['largo']:.2f}\t{analisis['ancho']:.2f}\t"
                 f"{analisis['grosor']:.2f}\t{len(analisis['taladros'])}\t{len(analisis['cajeados'])}\t"
                 f"{' | '.join(avisos) if avisos else '-'}\tmm"
             )
             piezas_json.append({
                 'nombre_capa': nombre_capa,
+                'unidades': ent.unidades,
+                'material': ent.material,
                 'largo': analisis['largo'],
                 'ancho': analisis['ancho'],
                 'grosor': analisis['grosor'],
