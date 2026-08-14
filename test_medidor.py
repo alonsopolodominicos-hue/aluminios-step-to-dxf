@@ -2,6 +2,8 @@
 
     .venv-step/bin/python services/step-to-dxf/test_medidor.py
 """
+import base64
+import io
 import math
 import os
 import sys
@@ -12,7 +14,7 @@ import ezdxf
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from medidor_dxf import (  # noqa: E402
     caja_minima, envolvente_convexa, punto_dentro, area_con_signo,
-    reconstruir_bucles, medir_dxf,
+    reconstruir_bucles, medir_dxf, detectar_nombre,
 )
 
 FALLOS = []
@@ -112,9 +114,68 @@ def caso_robusto():
     check('[robusto] un fichero que no existe devuelve aviso', r2['piezas'] == [] and r2['avisos'])
 
 
+def caso_deteccion_nombre():
+    """Qué pieza es cada una: el texto que cae dentro (o pegado a) su contorno."""
+    print('CASO: detección del nombre de la pieza por texto')
+    cuadrado = [(0, 0), (10, 0), (10, 10), (0, 10)]
+
+    check('[nombre] texto dentro del contorno se detecta',
+          detectar_nombre(cuadrado, [((5, 5), 'P01')]) == 'P01')
+    check('[nombre] texto pegado pero fuera del contorno se detecta',
+          detectar_nombre(cuadrado, [((15, 5), 'P02')]) == 'P02')
+    check('[nombre] texto lejos del contorno no se detecta',
+          detectar_nombre(cuadrado, [((1000, 1000), 'LEJOS')]) is None)
+    check('[nombre] sin ningún texto no se detecta',
+          detectar_nombre(cuadrado, []) is None)
+    check('[nombre] con varios textos elige el más cercano',
+          detectar_nombre(cuadrado, [((1000, 1000), 'LEJOS'), ((5, 5), 'CERCA')]) == 'CERCA')
+
+
+def caso_dxf_con_nombres_y_cotas():
+    """Extremo a extremo: medir_dxf pone nombre a la pieza con texto y genera
+    un DXF acotado con cotas nativas y etiqueta en la que no tenía texto."""
+    print('CASO: DXF completo con nombres de pieza y DXF acotado')
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    # Pieza 1: 100x50 con su nombre escrito dentro.
+    msp.add_lwpolyline([(0, 0), (100, 0), (100, 50), (0, 50)], close=True)
+    msp.add_text('P01', height=5).set_placement((50, 25))
+    # Pieza 2: 100x50 girada 20°, sin ningún texto cerca.
+    pieza2 = girar([(0, 300), (100, 300), (100, 350), (0, 350)], 20, cx=0, cy=325)
+    msp.add_lwpolyline(pieza2, close=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'p.dxf')
+        doc.saveas(ruta)
+        r = medir_dxf(ruta)
+
+    piezas = r['piezas']
+    check('[dxf] detecta las 2 piezas', len(piezas) == 2, str(len(piezas)))
+    check('[dxf] la pieza con texto dentro lleva su nombre',
+          any(p['nombre'] == 'P01' for p in piezas), str(piezas))
+    check('[dxf] la pieza sin texto cerca queda sin nombre',
+          any(p['nombre'] is None for p in piezas), str(piezas))
+
+    b64 = r.get('dxf_acotado_base64')
+    check('[acotado] la respuesta trae un DXF acotado', bool(b64))
+    if b64:
+        doc2 = ezdxf.read(io.StringIO(base64.b64decode(b64).decode('utf-8')))
+        msp2 = doc2.modelspace()
+        dims = list(msp2.query('DIMENSION'))
+        check('[acotado] hay 2 cotas por pieza (largo + ancho) × 2 piezas',
+              len(dims) == 4, str(len(dims)))
+        medidas = sorted(round(d.get_measurement(), 1) for d in dims)
+        check('[acotado] las cotas miden 50 y 100, como las piezas',
+              medidas == [50.0, 50.0, 100.0, 100.0], str(medidas))
+        textos = [t.plain_text() for t in msp2.query('TEXT')]
+        check('[acotado] la pieza sin nombre lleva una etiqueta "Pieza N" en el plano',
+              any('Pieza' in t for t in textos), str(textos))
+
+
 if __name__ == '__main__':
     for caso in (caso_calibre_rotatorio, caso_envolvente_y_dentro,
-                 caso_reconstruccion, caso_dxf_completo, caso_robusto):
+                 caso_reconstruccion, caso_dxf_completo, caso_robusto,
+                 caso_deteccion_nombre, caso_dxf_con_nombres_y_cotas):
         caso()
         print()
     if FALLOS:

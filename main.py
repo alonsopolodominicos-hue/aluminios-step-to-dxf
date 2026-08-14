@@ -637,6 +637,7 @@ async def medir_dxf_endpoint(
         'archivo': file.filename or 'plano.dxf',
         'piezas': resultado['piezas'],
         'avisos': resultado['avisos'],
+        'dxf_acotado_base64': resultado['dxf_acotado_base64'],
     })
 
 

@@ -25,9 +25,12 @@ engordarían el contenedor sin aportar nada aquí.
 """
 from __future__ import annotations
 
+import base64
+import io
 import math
 
 import ezdxf
+from ezdxf.enums import TextEntityAlignment
 
 # Dos extremos más cerca que esto se consideran el mismo punto al unir
 # segmentos. Los DXF reales no cierran perfecto: un CAD que exporta arcos
@@ -327,14 +330,177 @@ def caja_minima(puntos):
     return max(a, b), min(a, b), angulo
 
 
+# ── Fase 5: qué pieza es cada una (texto asociado) ───────────────────────────
+
+# Una etiqueta pegada al contorno (pero fuera de él, como se suele dibujar en
+# taller) sigue contando como "el nombre de esta pieza". Más lejos que esto
+# ya no se puede saber a qué pieza pertenece.
+DISTANCIA_MAX_TEXTO = 30.0  # mm
+
+
+def _distancia_punto_segmento(p, a, b):
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.dist(p, a)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.dist(p, (ax + t * dx, ay + t * dy))
+
+
+def _distancia_a_contorno(punto, contorno):
+    """0 si el punto está dentro; si no, la distancia al lado más cercano."""
+    if punto_dentro(punto, contorno):
+        return 0.0
+    n = len(contorno)
+    return min(_distancia_punto_segmento(punto, contorno[i], contorno[(i + 1) % n])
+               for i in range(n))
+
+
+def extraer_textos(msp):
+    """Todos los TEXT/MTEXT del plano → [(punto_inserción, contenido), ...].
+
+    Son candidatos a "nombre de pieza": lo que no se sepa leer se ignora,
+    igual que en extraer_segmentos.
+    """
+    textos = []
+    for e in msp:
+        try:
+            if e.dxftype() in ('TEXT', 'MTEXT'):
+                contenido = e.plain_text().strip()
+                if contenido:
+                    ins = e.dxf.insert
+                    textos.append(((ins.x, ins.y), contenido))
+        except Exception:
+            continue
+    return textos
+
+
+def detectar_nombre(contorno, textos):
+    """El texto que identifica esta pieza: el más cercano a su contorno,
+    dentro de DISTANCIA_MAX_TEXTO. None si no hay ninguno lo bastante cerca.
+    """
+    candidatos = sorted(
+        ((_distancia_a_contorno(p, contorno), t) for p, t in textos),
+        key=lambda x: x[0],
+    )
+    if candidatos and candidatos[0][0] <= DISTANCIA_MAX_TEXTO:
+        return candidatos[0][1]
+    return None
+
+
+# ── Fase 6: DXF acotado (cotas + etiqueta) ───────────────────────────────────
+
+DIM_TEXTO_ALTURA = 3.5   # mm de texto de cota — legible en piezas de taller
+DIM_FLECHA_TAMANO = 2.5  # mm de flecha de cota
+DIM_OFFSET = 15.0        # mm entre el contorno de la pieza y su línea de cota
+ETIQUETA_ALTURA = 8.0    # mm de la etiqueta "Pieza N" cuando no hay nombre
+
+
+def centroide(poligono):
+    """Centroide de área del polígono (no el promedio de vértices: en una
+    pieza con una L o un saliente el promedio puede caer fuera de la pieza,
+    el centroide de área no)."""
+    a = area_con_signo(poligono)
+    if abs(a) < 1e-9:
+        xs = [p[0] for p in poligono]
+        ys = [p[1] for p in poligono]
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+    cx = cy = 0.0
+    n = len(poligono)
+    for i in range(n):
+        x0, y0 = poligono[i]
+        x1, y1 = poligono[(i + 1) % n]
+        cruzado = x0 * y1 - x1 * y0
+        cx += (x0 + x1) * cruzado
+        cy += (y0 + y1) * cruzado
+    factor = 1.0 / (6.0 * a)
+    return cx * factor, cy * factor
+
+
+def esquinas_caja_girada(puntos, angulo_grados):
+    """Las 4 esquinas de la caja alineada con `angulo_grados`, en las
+    coordenadas del dibujo. Reconstruye la caja de caja_minima() a partir del
+    ángulo ya calculado, sin repetir el barrido del calibre rotatorio."""
+    a = math.radians(angulo_grados)
+    ux, uy = math.cos(a), math.sin(a)
+    proy_u = [p[0] * ux + p[1] * uy for p in puntos]
+    proy_v = [-p[0] * uy + p[1] * ux for p in puntos]
+    umin, umax = min(proy_u), max(proy_u)
+    vmin, vmax = min(proy_v), max(proy_v)
+
+    def deshacer(u, v):
+        return (u * ux - v * uy, u * uy + v * ux)
+
+    return [deshacer(umin, vmin), deshacer(umax, vmin),
+            deshacer(umax, vmax), deshacer(umin, vmax)]
+
+
+def _override_estilo_cota():
+    return {
+        'dimtxt': DIM_TEXTO_ALTURA,
+        'dimasz': DIM_FLECHA_TAMANO,
+        'dimexo': 0.5,
+        'dimexe': 1.0,
+        'dimdec': 1,
+    }
+
+
+def _cotar_arista(msp, p_a, p_b, punto_interior):
+    """Cota lineal a lo largo de p_a→p_b, desplazada hacia afuera de la
+    pieza (en sentido contrario a `punto_interior`, su centroide)."""
+    angulo = math.degrees(math.atan2(p_b[1] - p_a[1], p_b[0] - p_a[0]))
+    mx, my = (p_a[0] + p_b[0]) / 2, (p_a[1] + p_b[1]) / 2
+    nx, ny = -(p_b[1] - p_a[1]), (p_b[0] - p_a[0])
+    norma = math.hypot(nx, ny) or 1.0
+    nx, ny = nx / norma, ny / norma
+    if (punto_interior[0] - mx) * nx + (punto_interior[1] - my) * ny > 0:
+        nx, ny = -nx, -ny   # la normal apuntaba hacia dentro de la pieza: se invierte
+    base = (mx + nx * DIM_OFFSET, my + ny * DIM_OFFSET)
+    dim = msp.add_linear_dim(base=base, p1=p_a, p2=p_b, angle=angulo,
+                             override=_override_estilo_cota())
+    dim.render()
+
+
+def generar_dxf_acotado(doc, exteriores, piezas):
+    """Añade a `doc` (in situ) las cotas de largo/ancho de cada pieza y, si
+    no se le detectó nombre, una etiqueta "Pieza N" en su centroide. No toca
+    la geometría original: solo añade entidades DIMENSION y TEXT."""
+    msp = doc.modelspace()
+    for contorno, pieza in zip(exteriores, piezas):
+        c0, c1, c2, _c3 = esquinas_caja_girada(contorno, pieza['angulo'])
+        centro = centroide(contorno)
+        arista_a, arista_b = (c0, c1), (c1, c2)
+        # La arista más larga de las dos cota el "largo"; la otra, el "ancho"
+        # — el orden en el plano no importa, cada cota mide lo que mide.
+        for arista in (arista_a, arista_b):
+            _cotar_arista(msp, arista[0], arista[1], centro)
+
+        if not pieza.get('nombre'):
+            etiqueta = msp.add_text(f"Pieza {pieza['id']}", height=ETIQUETA_ALTURA)
+            etiqueta.set_placement(centro, align=TextEntityAlignment.MIDDLE_CENTER)
+    return doc
+
+
+def dxf_a_base64(doc):
+    buf = io.StringIO()
+    doc.write(buf)
+    return base64.b64encode(buf.getvalue().encode('utf-8')).decode('ascii')
+
+
 # ── Entrada principal ────────────────────────────────────────────────────────
 
 def medir_dxf(ruta_o_stream):
     """Mide todas las piezas de un DXF.
 
     Devuelve {'piezas': [{'id', 'largo', 'ancho', 'angulo', 'area',
-    'agujeros'}], 'avisos': [...]}. Las medidas son las de la caja mínima, o
-    sea las reales de la pieza aunque esté girada en el dibujo.
+    'agujeros', 'nombre'}], 'avisos': [...], 'dxf_acotado_base64': ...}. Las
+    medidas son las de la caja mínima, o sea las reales de la pieza aunque
+    esté girada en el dibujo. El nombre sale de un TEXT/MTEXT del propio
+    plano pegado al contorno de la pieza; si no hay ninguno, queda en None.
+    El DXF acotado es el mismo plano con una cota de largo y otra de ancho
+    por pieza, y una etiqueta "Pieza N" donde no se detectó nombre.
     """
     avisos = []
     try:
@@ -375,10 +541,12 @@ def medir_dxf(ruta_o_stream):
             'id': 1, 'largo': round(largo, 2), 'ancho': round(ancho, 2),
             'largo_recto': max(recto_x, recto_y), 'ancho_recto': min(recto_x, recto_y),
             'angulo': round(angulo % 180.0, 2),
-            'area': None, 'agujeros': 0, 'contorno_cerrado': False,
-        }], 'avisos': avisos}
+            'area': None, 'agujeros': 0, 'contorno_cerrado': False, 'nombre': None,
+        }], 'avisos': avisos, 'dxf_acotado_base64': None}
 
+    textos = extraer_textos(doc.modelspace())
     piezas = []
+    contornos_piezas = []
     for i, contorno in enumerate(exteriores, start=1):
         perimetro = sum(math.dist(contorno[j], contorno[(j + 1) % len(contorno)])
                         for j in range(len(contorno)))
@@ -387,6 +555,7 @@ def medir_dxf(ruta_o_stream):
         largo, ancho, angulo = caja_minima(contorno)
         recto_x, recto_y = caja_recta(contorno)
         dentro = sum(1 for a in agujeros if punto_dentro(a[0], contorno))
+        contornos_piezas.append(contorno)
         piezas.append({
             'id': i,
             'largo': round(largo, 2),
@@ -399,9 +568,15 @@ def medir_dxf(ruta_o_stream):
             'area': round(abs(area_con_signo(contorno)), 2),
             'agujeros': dentro,
             'contorno_cerrado': True,
+            'nombre': detectar_nombre(contorno, textos),
         })
 
     if agujeros:
         avisos.append(f'{len(agujeros)} contorno(s) interior(es) tratados como '
                       f'agujeros o mecanizados, no como piezas.')
-    return {'piezas': piezas, 'avisos': avisos}
+
+    dxf_acotado_base64 = None
+    if piezas:
+        dxf_acotado_base64 = dxf_a_base64(generar_dxf_acotado(doc, contornos_piezas, piezas))
+
+    return {'piezas': piezas, 'avisos': avisos, 'dxf_acotado_base64': dxf_acotado_base64}
