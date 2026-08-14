@@ -182,10 +182,60 @@ def caso_dxf_con_nombres_y_cotas():
               any('Pieza' in t for t in textos), str(textos))
 
 
+def caso_cota_a_escala_de_la_pieza():
+    """Una pieza de taller real puede medir 130 mm o 3000 mm. Una cota de
+    letra fija (3,5 mm) se ve bien en la pequeña y es INVISIBLE en la
+    grande — bug real visto con un DXF del taller (piezas T08 de 2-3 m)."""
+    print('CASO: la cota se escala con el tamaño de la pieza')
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    # Pieza grande, tal cual las del taller (T08-11 medía 3000x500).
+    msp.add_lwpolyline([(0, 0), (3000, 0), (3000, 500), (0, 500)], close=True)
+    # Pieza pequeña, para comprobar que no se dispara al otro extremo.
+    msp.add_lwpolyline([(0, 2000), (30, 2000), (30, 2020), (0, 2020)], close=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'p.dxf')
+        doc.saveas(ruta)
+        r = medir_dxf(ruta)
+
+    piezas = sorted(r['piezas'], key=lambda p: p['largo'])
+    check('[escala] detecta las 2 piezas', len(piezas) == 2, str(len(piezas)))
+    grande = next(p for p in piezas if p['largo'] > 1000)
+    pequena = next(p for p in piezas if p['largo'] < 100)
+
+    doc2 = ezdxf.read(io.StringIO(base64.b64decode(r['dxf_acotado_base64']).decode('utf-8')))
+    msp2 = doc2.modelspace()
+
+    def altura_texto_de(pieza_id):
+        # Busca el TEXT dentro de cualquier bloque de cota cuyo valor medido
+        # coincida con el largo o el ancho de esa pieza.
+        for d in msp2.query('DIMENSION'):
+            medida = d.get_measurement()
+            if not (abs(medida - pieza_id['largo']) < 1 or abs(medida - pieza_id['ancho']) < 1):
+                continue
+            bloque = doc2.blocks.get(d.dxf.geometry)
+            for e in bloque:
+                if e.dxftype() == 'TEXT':
+                    return e.dxf.height
+        return None
+
+    alto_grande = altura_texto_de(grande)
+    alto_pequena = altura_texto_de(pequena)
+    check('[escala] la pieza de 3000 mm lleva letra bastante mayor que 3,5 mm (antes era invisible)',
+          alto_grande is not None and alto_grande > 10, str(alto_grande))
+    check('[escala] la pieza de 30 mm no se dispara a un tamaño absurdo (tope razonable)',
+          alto_pequena is not None and alto_pequena < 10, str(alto_pequena))
+    check('[escala] la pieza grande lleva letra bastante mayor que la pequeña',
+          alto_grande is not None and alto_pequena is not None and alto_grande > alto_pequena * 2,
+          f'{alto_grande} vs {alto_pequena}')
+
+
 if __name__ == '__main__':
     for caso in (caso_calibre_rotatorio, caso_envolvente_y_dentro,
                  caso_reconstruccion, caso_dxf_completo, caso_robusto,
-                 caso_deteccion_nombre, caso_dxf_con_nombres_y_cotas):
+                 caso_deteccion_nombre, caso_dxf_con_nombres_y_cotas,
+                 caso_cota_a_escala_de_la_pieza):
         caso()
         print()
     if FALLOS:

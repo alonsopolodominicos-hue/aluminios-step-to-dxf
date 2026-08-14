@@ -392,10 +392,24 @@ def detectar_nombre(contorno, textos):
 
 # ── Fase 6: DXF acotado (cotas + etiqueta) ───────────────────────────────────
 
-DIM_TEXTO_ALTURA = 3.5   # mm de texto de cota — legible en piezas de taller
-DIM_FLECHA_TAMANO = 2.5  # mm de flecha de cota
-DIM_OFFSET = 15.0        # mm entre el contorno de la pieza y su línea de cota
-ETIQUETA_ALTURA = 8.0    # mm de la etiqueta "Pieza N" cuando no hay nombre
+# Una pieza de taller mide de 130 mm a más de 3000 mm. Un tamaño de letra FIJO
+# se ve bien en una y es invisible o desproporcionado en la otra (bug real:
+# piezas de 2-3 m con letra de 3,5 mm, imposible de ver a la escala del
+# plano). Se ancla al tamaño de la propia pieza, con un mínimo y un máximo
+# para que siga siendo legible en los dos extremos.
+TEXTO_MIN, TEXTO_MAX = 2.0, 20.0      # mm — tope de letra de cota
+TEXTO_FRACCION = 0.012                # letra ≈ 1,2% del largo de la pieza
+# Mismas proporciones que tenía la versión de tamaño fijo (3,5 / 2,5 / 15).
+FLECHA_SOBRE_TEXTO = 2.5 / 3.5
+OFFSET_SOBRE_TEXTO = 15.0 / 3.5
+ETIQUETA_SOBRE_TEXTO = 8.0 / 3.5
+
+
+def escala_cota(largo_pieza):
+    """(altura_texto, tamaño_flecha, offset_a_la_pieza, altura_etiqueta), en
+    mm, proporcionales al largo de la pieza que se está acotando."""
+    texto = min(TEXTO_MAX, max(TEXTO_MIN, largo_pieza * TEXTO_FRACCION))
+    return texto, texto * FLECHA_SOBRE_TEXTO, texto * OFFSET_SOBRE_TEXTO, texto * ETIQUETA_SOBRE_TEXTO
 
 
 def centroide(poligono):
@@ -437,12 +451,12 @@ def esquinas_caja_girada(puntos, angulo_grados):
             deshacer(umax, vmax), deshacer(umin, vmax)]
 
 
-def _override_estilo_cota():
+def _override_estilo_cota(texto, flecha):
     return {
-        'dimtxt': DIM_TEXTO_ALTURA,
-        'dimasz': DIM_FLECHA_TAMANO,
-        'dimexo': 0.5,
-        'dimexe': 1.0,
+        'dimtxt': texto,
+        'dimasz': flecha,
+        'dimexo': flecha * 0.2,
+        'dimexe': flecha * 0.4,
         'dimdec': 1,
     }
 
@@ -468,7 +482,7 @@ def _texto_plano_en_bloque(doc, nombre_bloque):
         bloque.delete_entity(e)
 
 
-def _cotar_arista(msp, p_a, p_b, punto_interior):
+def _cotar_arista(msp, p_a, p_b, punto_interior, texto, flecha, offset):
     """Cota lineal a lo largo de p_a→p_b, desplazada hacia afuera de la
     pieza (en sentido contrario a `punto_interior`, su centroide)."""
     angulo = math.degrees(math.atan2(p_b[1] - p_a[1], p_b[0] - p_a[0]))
@@ -478,9 +492,9 @@ def _cotar_arista(msp, p_a, p_b, punto_interior):
     nx, ny = nx / norma, ny / norma
     if (punto_interior[0] - mx) * nx + (punto_interior[1] - my) * ny > 0:
         nx, ny = -nx, -ny   # la normal apuntaba hacia dentro de la pieza: se invierte
-    base = (mx + nx * DIM_OFFSET, my + ny * DIM_OFFSET)
+    base = (mx + nx * offset, my + ny * offset)
     dim = msp.add_linear_dim(base=base, p1=p_a, p2=p_b, angle=angulo,
-                             override=_override_estilo_cota())
+                             override=_override_estilo_cota(texto, flecha))
     dim.render()
     nombre_bloque = dim.dimension.dxf.geometry
     if nombre_bloque:
@@ -495,14 +509,15 @@ def generar_dxf_acotado(doc, exteriores, piezas):
     for contorno, pieza in zip(exteriores, piezas):
         c0, c1, c2, _c3 = esquinas_caja_girada(contorno, pieza['angulo'])
         centro = centroide(contorno)
+        texto, flecha, offset, etiqueta_altura = escala_cota(pieza['largo'])
         arista_a, arista_b = (c0, c1), (c1, c2)
         # La arista más larga de las dos cota el "largo"; la otra, el "ancho"
         # — el orden en el plano no importa, cada cota mide lo que mide.
         for arista in (arista_a, arista_b):
-            _cotar_arista(msp, arista[0], arista[1], centro)
+            _cotar_arista(msp, arista[0], arista[1], centro, texto, flecha, offset)
 
         if not pieza.get('nombre'):
-            etiqueta = msp.add_text(f"Pieza {pieza['id']}", height=ETIQUETA_ALTURA)
+            etiqueta = msp.add_text(f"Pieza {pieza['id']}", height=etiqueta_altura)
             etiqueta.set_placement(centro, align=TextEntityAlignment.MIDDLE_CENTER)
     return doc
 
