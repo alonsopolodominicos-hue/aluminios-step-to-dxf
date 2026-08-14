@@ -167,6 +167,16 @@ def caso_dxf_con_nombres_y_cotas():
         medidas = sorted(round(d.get_measurement(), 1) for d in dims)
         check('[acotado] las cotas miden 50 y 100, como las piezas',
               medidas == [50.0, 50.0, 100.0, 100.0], str(medidas))
+
+        # El número de la cota tiene que verse en CUALQUIER visor: muchos
+        # lectores de DXF de taller (CNC, nesting) dibujan LINE/ARC/INSERT
+        # pero no entienden MTEXT, así que el texto tiene que ser TEXT plano.
+        for d in dims:
+            bloque = doc2.blocks.get(d.dxf.geometry)
+            tipos_texto = [e.dxftype() for e in bloque if e.dxftype() in ('TEXT', 'MTEXT')]
+            check(f'[acotado] la cota {d.dxf.geometry} usa TEXT, no MTEXT',
+                  tipos_texto == ['TEXT'], str(tipos_texto))
+
         textos = [t.plain_text() for t in msp2.query('TEXT')]
         check('[acotado] la pieza sin nombre lleva una etiqueta "Pieza N" en el plano',
               any('Pieza' in t for t in textos), str(textos))

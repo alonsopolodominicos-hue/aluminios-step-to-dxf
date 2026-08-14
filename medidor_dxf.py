@@ -447,6 +447,27 @@ def _override_estilo_cota():
     }
 
 
+def _texto_plano_en_bloque(doc, nombre_bloque):
+    """ezdxf pone el número de la cota como MTEXT en cuanto el documento es
+    DXF R2000 o superior (o sea, casi siempre) — y bastante software de
+    taller (nesting, CNC) dibuja LINE/ARC/INSERT pero no entiende MTEXT, así
+    que la cota se ve sin número. Se cambia por un TEXT normal y corriente,
+    que no falla en ningún lector, con el mismo contenido/tamaño/posición."""
+    bloque = doc.blocks.get(nombre_bloque)
+    for e in list(bloque):
+        if e.dxftype() != 'MTEXT':
+            continue
+        texto = bloque.add_text(e.plain_text(), dxfattribs={
+            'height': e.dxf.char_height,
+            'style': e.dxf.style,
+            'color': e.dxf.color,
+            'layer': e.dxf.layer,
+        })
+        texto.set_placement(e.dxf.insert, align=TextEntityAlignment.MIDDLE_CENTER)
+        texto.dxf.rotation = e.get_rotation()
+        bloque.delete_entity(e)
+
+
 def _cotar_arista(msp, p_a, p_b, punto_interior):
     """Cota lineal a lo largo de p_a→p_b, desplazada hacia afuera de la
     pieza (en sentido contrario a `punto_interior`, su centroide)."""
@@ -461,6 +482,9 @@ def _cotar_arista(msp, p_a, p_b, punto_interior):
     dim = msp.add_linear_dim(base=base, p1=p_a, p2=p_b, angle=angulo,
                              override=_override_estilo_cota())
     dim.render()
+    nombre_bloque = dim.dimension.dxf.geometry
+    if nombre_bloque:
+        _texto_plano_en_bloque(msp.doc, nombre_bloque)
 
 
 def generar_dxf_acotado(doc, exteriores, piezas):
