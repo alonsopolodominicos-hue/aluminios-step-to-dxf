@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from medidor_dxf import (  # noqa: E402
     caja_minima, envolvente_convexa, punto_dentro, area_con_signo,
     reconstruir_bucles, medir_dxf, detectar_nombre, extraer_segmentos,
+    detectar_sector_circular, _segmentos_de_arco,
 )
 
 FALLOS = []
@@ -214,6 +215,76 @@ def caso_lwpolyline_con_bulge():
               dist_max > 5, f'{dist_max:.2f}')
 
 
+def caso_deteccion_sector_circular():
+    """Una pieza en abanico (cuña/sector circular) no la describe bien
+    "largo x ancho de la caja mínima": ningún lado de esa caja coincide con
+    un lado real de la pieza. Hay que detectarla para cotarla distinto
+    (radio + ángulo, como se acotaría a mano)."""
+    print('CASO: detección de piezas en forma de sector circular (cuña)')
+    centro = (100.0, 200.0)
+    radio = 500.0
+    angulo_a, angulo_b = 10.0, 55.0
+    arco = _segmentos_de_arco(centro[0], centro[1], radio, angulo_a, angulo_b)
+    contorno = [centro] + arco  # centro → arco[0] (recto) → … → arco[-1] (recto de vuelta)
+
+    resultado = detectar_sector_circular(contorno)
+    check('[sector] detecta la cuña', resultado is not None)
+    if resultado:
+        c, r, _a1, _a2, barrido = resultado
+        check('[sector] centro correcto', math.dist(c, centro) < 0.5, str(c))
+        check('[sector] radio correcto', abs(r - radio) < 1, str(r))
+        check('[sector] barrido correcto (45°)', abs(barrido - 45) < 0.5, str(barrido))
+
+    rectangulo = [(0, 0), (100, 0), (100, 50), (0, 50)]
+    check('[sector] un rectángulo no se confunde con una cuña',
+          detectar_sector_circular(rectangulo) is None)
+
+    radios_distintos = [(0, 0), (300, 0)] + _segmentos_de_arco(0, 0, 500, 90, 100)
+    check('[sector] dos "radios" de longitud muy distinta no cuentan como cuña limpia',
+          detectar_sector_circular(radios_distintos) is None)
+
+
+def caso_dxf_acotado_pieza_en_cuna():
+    """Extremo a extremo: una pieza en abanico se acota con radio + ángulo,
+    no con las dos cotas de largo/ancho que sí valen para un rectángulo."""
+    print('CASO: DXF con una pieza en forma de cuña se acota con radio y ángulo')
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    centro = (0.0, 0.0)
+    radio = 600.0
+    angulo_a, angulo_b = 5.0, 50.0  # 45° de barrido
+    pa = (radio * math.cos(math.radians(angulo_a)), radio * math.sin(math.radians(angulo_a)))
+    pb = (radio * math.cos(math.radians(angulo_b)), radio * math.sin(math.radians(angulo_b)))
+    bulge = math.tan(math.radians(angulo_b - angulo_a) / 4)
+    msp.add_lwpolyline(
+        [(centro[0], centro[1], 0.0), (pa[0], pa[1], bulge), (pb[0], pb[1], 0.0)],
+        format='xyb', close=True,
+    )
+    medio = ((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2)
+    msp.add_text('T04-01', height=10).set_placement(medio)
+
+    with tempfile.TemporaryDirectory() as d:
+        ruta = os.path.join(d, 'cuna.dxf')
+        doc.saveas(ruta)
+        r = medir_dxf(ruta)
+
+    check('[cuña] detecta 1 pieza', len(r['piezas']) == 1, str(r['piezas']))
+
+    doc2 = ezdxf.read(io.StringIO(base64.b64decode(r['dxf_acotado_base64']).decode('utf-8')))
+    dims = list(doc2.modelspace().query('DIMENSION'))
+    tipos = sorted(d.dimtype for d in dims)
+    check('[cuña] lleva una cota de radio (4) y una de ángulo (5), no largo/ancho',
+          tipos == [4, 5], str(tipos))
+    if 4 in tipos:
+        radio_medido = next(d.get_measurement() for d in dims if d.dimtype == 4)
+        check('[cuña] la cota de radio mide lo que mide de verdad',
+              abs(radio_medido - radio) < 5, str(radio_medido))
+    if 5 in tipos:
+        angulo_medido = next(d.get_measurement() for d in dims if d.dimtype == 5)
+        check('[cuña] la cota de ángulo mide el barrido real (45°)',
+              abs(angulo_medido - 45) < 1, str(angulo_medido))
+
+
 def caso_cota_a_escala_de_la_pieza():
     """Una pieza de taller real puede medir 130 mm o 3000 mm. Una cota de
     letra fija (3,5 mm) se ve bien en la pequeña y es INVISIBLE en la
@@ -267,7 +338,8 @@ if __name__ == '__main__':
     for caso in (caso_calibre_rotatorio, caso_envolvente_y_dentro,
                  caso_reconstruccion, caso_dxf_completo, caso_robusto,
                  caso_deteccion_nombre, caso_dxf_con_nombres_y_cotas,
-                 caso_cota_a_escala_de_la_pieza, caso_lwpolyline_con_bulge):
+                 caso_cota_a_escala_de_la_pieza, caso_lwpolyline_con_bulge,
+                 caso_deteccion_sector_circular, caso_dxf_acotado_pieza_en_cuna):
         caso()
         print()
     if FALLOS:

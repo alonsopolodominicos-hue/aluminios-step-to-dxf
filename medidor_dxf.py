@@ -491,6 +491,65 @@ def esquinas_caja_girada(puntos, angulo_grados):
             deshacer(umax, vmax), deshacer(umin, vmax)]
 
 
+# Una arista "de radio" mide al menos esto veces la longitud media de las
+# aristas del contorno — la de un sector circular troceado (radios rectos +
+# arco hecho de aristas cortas a TOL_CURVA) destaca muchísimo del resto.
+UMBRAL_RADIO_ARISTA = 3.0
+# Los dos radios de un sector limpio miden prácticamente lo mismo; más
+# diferencia que esto y no se considera un sector de verdad.
+TOLERANCIA_RADIOS_IGUALES = 0.05
+
+
+def detectar_sector_circular(contorno):
+    """Si el contorno es (aproximadamente) un sector circular — cuña, como
+    las piezas en abanico tipo "candileja" — devuelve (centro, radio,
+    angulo_inicio, angulo_fin, barrido) en grados, con el barrido siempre
+    ≤ 180° y angulo_inicio→angulo_fin en sentido antihorario. None si no lo
+    parece (piezas rectangulares, en L, etc.): para esas, "largo × ancho de
+    la caja mínima" sí tiene sentido y no hace falta esto.
+
+    Un sector circular troceado por extraer_segmentos deja una firma muy
+    reconocible: dos aristas RECTAS mucho más largas que la media (los dos
+    radios) que comparten un vértice (el centro), con el resto del contorno
+    hecho de muchas aristas cortas (el arco). Cotar ese contorno por "largo
+    × ancho de la caja mínima envolvente" no significa nada — ninguno de
+    los lados de esa caja coincide con un lado real de la pieza.
+    """
+    # reconstruir_bucles() puede dejar el punto de cierre duplicado (el
+    # mismo punto al principio y al final): sin quitarlo, la adyacencia
+    # cíclica por índice queda descuadrada en un hueco de más.
+    if len(contorno) > 1 and math.dist(contorno[0], contorno[-1]) < 1e-6:
+        contorno = contorno[:-1]
+    n = len(contorno)
+    if n < 6:
+        return None
+    longitudes = [math.dist(contorno[i], contorno[(i + 1) % n]) for i in range(n)]
+    media = sum(longitudes) / n
+    largas = [i for i, longitud in enumerate(longitudes) if longitud > media * UMBRAL_RADIO_ARISTA]
+    if len(largas) != 2:
+        return None
+
+    i1, i2 = largas
+    if (i1 + 1) % n == i2:
+        centro, lejano1, lejano2 = contorno[i2], contorno[i1], contorno[(i2 + 1) % n]
+    elif (i2 + 1) % n == i1:
+        centro, lejano1, lejano2 = contorno[i1], contorno[i2], contorno[(i1 + 1) % n]
+    else:
+        return None  # las dos aristas largas no comparten vértice: no es una cuña
+
+    radio1, radio2 = math.dist(centro, lejano1), math.dist(centro, lejano2)
+    if radio1 < 1e-6 or radio2 < 1e-6 or abs(radio1 - radio2) > TOLERANCIA_RADIOS_IGUALES * max(radio1, radio2):
+        return None
+
+    angulo1 = math.degrees(math.atan2(lejano1[1] - centro[1], lejano1[0] - centro[0]))
+    angulo2 = math.degrees(math.atan2(lejano2[1] - centro[1], lejano2[0] - centro[0]))
+    barrido = (angulo2 - angulo1) % 360
+    if barrido > 180:
+        angulo1, angulo2 = angulo2, angulo1
+        barrido = 360 - barrido
+    return centro, (radio1 + radio2) / 2, angulo1, angulo2, barrido
+
+
 def _override_estilo_cota(texto, flecha):
     return {
         'dimtxt': texto,
@@ -499,6 +558,26 @@ def _override_estilo_cota(texto, flecha):
         'dimexe': flecha * 0.4,
         'dimdec': 1,
     }
+
+
+def _cotar_sector(msp, centro, radio, angulo_ini, angulo_fin, texto, flecha, offset):
+    """Cota de radio (a lo largo de una de las dos aristas rectas) y cota de
+    ángulo (el barrido de la cuña) — para piezas en forma de sector, donde
+    largo/ancho de la caja mínima no describen ningún lado real."""
+    override_radio = {'dimtxt': texto, 'dimasz': flecha, 'dimdec': 0}
+    dim_r = msp.add_radius_dim_cra(centro, radio, angle=angulo_ini, override=override_radio)
+    dim_r.render()
+    nombre_r = dim_r.dimension.dxf.geometry
+    if nombre_r:
+        _texto_plano_en_bloque(msp.doc, nombre_r)
+
+    override_angulo = {'dimtxt': texto, 'dimasz': flecha, 'dimadec': 1}
+    dim_a = msp.add_angular_dim_cra(centro, radio + offset * 0.3, angulo_ini, angulo_fin,
+                                    distance=offset * 0.7, override=override_angulo)
+    dim_a.render()
+    nombre_a = dim_a.dimension.dxf.geometry
+    if nombre_a:
+        _texto_plano_en_bloque(msp.doc, nombre_a)
 
 
 def _texto_plano_en_bloque(doc, nombre_bloque):
@@ -542,19 +621,30 @@ def _cotar_arista(msp, p_a, p_b, punto_interior, texto, flecha, offset):
 
 
 def generar_dxf_acotado(doc, exteriores, piezas):
-    """Añade a `doc` (in situ) las cotas de largo/ancho de cada pieza y, si
-    no se le detectó nombre, una etiqueta "Pieza N" en su centroide. No toca
-    la geometría original: solo añade entidades DIMENSION y TEXT."""
+    """Añade a `doc` (in situ) las cotas de cada pieza y, si no se le
+    detectó nombre, una etiqueta "Pieza N" en su centroide. No toca la
+    geometría original: solo añade entidades DIMENSION y TEXT.
+
+    Una pieza rectangular se cota por largo/ancho de la caja mínima; una en
+    forma de cuña (detectar_sector_circular) se cota por radio y ángulo,
+    porque ningún lado de esa caja coincide con un lado real de la pieza.
+    """
     msp = doc.modelspace()
     for contorno, pieza in zip(exteriores, piezas):
-        c0, c1, c2, _c3 = esquinas_caja_girada(contorno, pieza['angulo'])
         centro = centroide(contorno)
         texto, flecha, offset, etiqueta_altura = escala_cota(pieza['largo'])
-        arista_a, arista_b = (c0, c1), (c1, c2)
-        # La arista más larga de las dos cota el "largo"; la otra, el "ancho"
-        # — el orden en el plano no importa, cada cota mide lo que mide.
-        for arista in (arista_a, arista_b):
-            _cotar_arista(msp, arista[0], arista[1], centro, texto, flecha, offset)
+
+        sector = detectar_sector_circular(contorno)
+        if sector:
+            centro_sector, radio, angulo_ini, angulo_fin, _barrido = sector
+            _cotar_sector(msp, centro_sector, radio, angulo_ini, angulo_fin, texto, flecha, offset)
+        else:
+            c0, c1, c2, _c3 = esquinas_caja_girada(contorno, pieza['angulo'])
+            # La arista más larga de las dos cota el "largo"; la otra, el
+            # "ancho" — el orden en el plano no importa, cada cota mide lo
+            # que mide.
+            for arista in ((c0, c1), (c1, c2)):
+                _cotar_arista(msp, arista[0], arista[1], centro, texto, flecha, offset)
 
         if not pieza.get('nombre'):
             etiqueta = msp.add_text(f"Pieza {pieza['id']}", height=etiqueta_altura)
