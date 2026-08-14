@@ -31,6 +31,7 @@ import math
 
 import ezdxf
 from ezdxf.enums import TextEntityAlignment
+from ezdxf.math import bulge_to_arc
 
 # Dos extremos más cerca que esto se consideran el mismo punto al unir
 # segmentos. Los DXF reales no cierran perfecto: un CAD que exporta arcos
@@ -80,6 +81,45 @@ def _puntos_a_segmentos(puntos, cerrado=False):
     return segmentos
 
 
+def _puntos_de_arco_con_bulge(p0, p1, bulge):
+    """Los puntos del arco que el bulge describe entre p0 y p1 (ambos
+    incluidos), YA en el orden p0→p1.
+
+    Así es como DXF mete un lado curvo dentro de una polilínea: no hay
+    entidad ARC aparte, el propio vértice lleva el bulge del tramo hasta el
+    siguiente. bulge_to_arc() de ezdxf siempre describe el arco en sentido
+    antihorario, así que en un bulge negativo (arco horario) devuelve los
+    ángulos de p1→p0: se revierte la lista de puntos para que quede p0→p1
+    otra vez.
+    """
+    centro, ang_ini, ang_fin, radio = bulge_to_arc(p0, p1, bulge)
+    puntos = _segmentos_de_arco(centro.x, centro.y, radio, math.degrees(ang_ini), math.degrees(ang_fin))
+    return list(reversed(puntos)) if bulge < 0 else puntos
+
+
+def _segmentos_de_polilinea(vertices_con_bulge, cerrado):
+    """Segmentos de una polilínea dada como [(x, y, bulge), ...]: un bulge
+    != 0 en un vértice significa que el tramo hasta el SIGUIENTE vértice es
+    un arco, no una recta (ver _puntos_de_arco_con_bulge). Tratarlo siempre
+    como recta —lo que hacía esta función antes— convierte cualquier pieza
+    con un borde redondeado o curvo en un polígono de lados rectos con la
+    medida inventada.
+    """
+    segmentos = []
+    n = len(vertices_con_bulge)
+    tramos = n if cerrado else n - 1
+    for i in range(tramos):
+        x0, y0, bulge = vertices_con_bulge[i]
+        x1, y1, _ = vertices_con_bulge[(i + 1) % n]
+        p0, p1 = (x0, y0), (x1, y1)
+        if abs(bulge) > 1e-9 and math.dist(p0, p1) > 1e-9:
+            puntos = _puntos_de_arco_con_bulge(p0, p1, bulge)
+        else:
+            puntos = [p0, p1]
+        segmentos += _puntos_a_segmentos(puntos)
+    return segmentos
+
+
 def extraer_segmentos(msp):
     """Todas las entidades dibujadas → segmentos rectos.
 
@@ -102,11 +142,11 @@ def extraer_segmentos(msp):
                 segmentos += _puntos_a_segmentos(
                     _segmentos_de_arco(c.x, c.y, e.dxf.radius, 0.0, 360.0), cerrado=True)
             elif tipo == 'LWPOLYLINE':
-                pts = [(p[0], p[1]) for p in e.get_points('xy')]
-                segmentos += _puntos_a_segmentos(pts, cerrado=bool(e.closed))
+                vertices = list(e.get_points('xyb'))
+                segmentos += _segmentos_de_polilinea(vertices, cerrado=bool(e.closed))
             elif tipo == 'POLYLINE':
-                pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-                segmentos += _puntos_a_segmentos(pts, cerrado=bool(e.is_closed))
+                vertices = [(v.dxf.location.x, v.dxf.location.y, v.dxf.bulge) for v in e.vertices]
+                segmentos += _segmentos_de_polilinea(vertices, cerrado=bool(e.is_closed))
             elif tipo == 'SPLINE':
                 # flattening() da la spline ya troceada a la tolerancia pedida.
                 pts = [(p[0], p[1]) for p in e.flattening(TOL_CURVA)]

@@ -14,7 +14,7 @@ import ezdxf
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from medidor_dxf import (  # noqa: E402
     caja_minima, envolvente_convexa, punto_dentro, area_con_signo,
-    reconstruir_bucles, medir_dxf, detectar_nombre,
+    reconstruir_bucles, medir_dxf, detectar_nombre, extraer_segmentos,
 )
 
 FALLOS = []
@@ -182,6 +182,38 @@ def caso_dxf_con_nombres_y_cotas():
               any('Pieza' in t for t in textos), str(textos))
 
 
+def caso_lwpolyline_con_bulge():
+    """Una LWPOLYLINE con bulge tiene un lado CURVO (así lo codifica DXF: no
+    hay entidad ARC aparte, el propio vértice lleva el bulge). Ignorarlo
+    convierte una pieza en forma de cuña en un triángulo de lados rectos con
+    la medida completamente inventada — bug real visto en un DXF de taller
+    (piezas "candilejas" en abanico con un borde curvo)."""
+    print('CASO: LWPOLYLINE con bulge (lado curvo)')
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    # Triángulo con un lado recto (0,0)-(100,0), uno curvo (100,0)-(50,80)
+    # con bulge, y uno recto de vuelta a (0,0).
+    msp.add_lwpolyline([(0, 0, 0.0), (100, 0, 0.35), (50, 80, 0.0)], format='xyb', close=True)
+
+    segmentos = extraer_segmentos(msp)
+    check('[bulge] el lado curvo se trocea en varios segmentos, no uno recto',
+          len(segmentos) > 5, f'{len(segmentos)} segmentos')
+
+    bucles = reconstruir_bucles(segmentos)
+    check('[bulge] el contorno reconstruido tiene muchos vértices (sigue la curva)',
+          len(bucles) == 1 and len(bucles[0]) > 8, str([len(b) for b in bucles]))
+
+    if bucles:
+        # El punto medio del lado recto (100,0)-(50,80) por cuerda estaría en
+        # (75,40); con el bulge hacia afuera, el contorno real debe llegar
+        # más lejos de esa cuerda que una simple línea recta.
+        contorno = bucles[0]
+        cuerda_media = (75.0, 40.0)
+        dist_max = max(math.dist(p, cuerda_media) for p in contorno)
+        check('[bulge] el arco se aleja de la cuerda recta (no es un triángulo de lados rectos)',
+              dist_max > 5, f'{dist_max:.2f}')
+
+
 def caso_cota_a_escala_de_la_pieza():
     """Una pieza de taller real puede medir 130 mm o 3000 mm. Una cota de
     letra fija (3,5 mm) se ve bien en la pequeña y es INVISIBLE en la
@@ -235,7 +267,7 @@ if __name__ == '__main__':
     for caso in (caso_calibre_rotatorio, caso_envolvente_y_dentro,
                  caso_reconstruccion, caso_dxf_completo, caso_robusto,
                  caso_deteccion_nombre, caso_dxf_con_nombres_y_cotas,
-                 caso_cota_a_escala_de_la_pieza):
+                 caso_cota_a_escala_de_la_pieza, caso_lwpolyline_con_bulge):
         caso()
         print()
     if FALLOS:
